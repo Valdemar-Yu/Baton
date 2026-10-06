@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+.claude/settings.local.json
+.claude/settings.local.json.bak
+.baton/runs/
+.council/

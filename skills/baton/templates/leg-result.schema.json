@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "artifact", "change_size"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["done", "decision", "report", "blocked"],
+      "description": "done = task finished and verified; decision = wrote a decision request; report = wrote a major-change report; blocked = cannot continue"
+    },
+    "summary": {
+      "type": "string",
+      "description": "What happened in this leg and how it was verified, or why it stopped"
+    },
+    "artifact": {
+      "type": "string",
+      "description": "Path of the decision request or report written this leg; empty string if none"
+    },
+    "change_size": {
+      "type": "string",
+      "enum": ["none", "minor", "major"],
+      "description": "Size of the code changes made in this leg"
+    }
+  }
+}

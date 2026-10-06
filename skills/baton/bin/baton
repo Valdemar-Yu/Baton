@@ -1,0 +1,11 @@
+#!/bin/sh
+# Thin launcher: resolve symlinks (install.sh links this into ~/.local/bin) and run baton.py.
+set -eu
+entry="$0"
+while [ -L "$entry" ]; do
+  parent=$(CDPATH= cd -P -- "$(dirname -- "$entry")" && pwd)
+  entry=$(readlink "$entry")
+  case "$entry" in /*) ;; *) entry="$parent/$entry" ;; esac
+done
+bin_dir=$(CDPATH= cd -P -- "$(dirname -- "$entry")" && pwd)
+exec python3 "$bin_dir/../scripts/baton.py" "$@"

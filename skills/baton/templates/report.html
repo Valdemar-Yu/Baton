@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 把 R<NNN> 和标题换成本次汇报的编号与一句话标题 -->
+<title>R<NNN> 标题 · Baton 汇报</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1f2328; --muted: #656d76; --line: #d8dee4;
+    --card: #ffffff; --accent: #8250df; --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e;
+    --code: #f3f4f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e6e8eb; --muted: #9198a1; --line: #30363d;
+      --card: #161a20; --accent: #b392f0; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+      --code: #1f242c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", "Segoe UI", sans-serif; }
+  main { max-width: 920px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 24px; }
+  h1 { font-size: 24px; margin: 0 0 8px; }
+  h2 { font-size: 18px; margin: 32px 0 12px; padding-left: 10px; border-left: 3px solid var(--accent); }
+  .meta { color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
+           border: 1px solid currentColor; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 4px 18px 14px; margin-top: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code); padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>R<NNN> 标题</h1>
+  <div class="meta">
+    <span>任务：<code>task-id</code></span>
+    <span>时间：YYYY-MM-DD HH:MM</span>
+    <span>执行者：gpt-6.1-sol · xhigh</span>
+    <!-- 自评：完成用 class="badge ok"，部分完成用 "badge warn"，验证失败用 "badge bad" -->
+    <span class="badge ok">完成，验证通过</span>
+  </div>
+</header>
+
+<section>
+  <h2>概要</h2>
+  <!-- 3 到 5 句：这次大修改解决了什么、核心做法、验证结果。 -->
+  <p>……</p>
+</section>
+
+<section>
+  <h2>改动清单</h2>
+  <!-- 本次汇报涉及的每个文件一行，新建文件也要列。行数：已跟踪文件用 git diff --numstat，新建文件用 wc -l，不要估计。 -->
+  <div class="scroll">
+  <table>
+    <thead><tr><th>文件</th><th>类型</th><th>增/删</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/example.py</code></td><td>修改</td><td class="num">+42 −7</td><td>……</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>设计与取舍</h2>
+  <!-- 为什么这样做；考虑过但没采用的方案及原因；对接口、数据格式、依赖的影响。 -->
+  <p>……</p>
+</section>
+
+<section>
+  <h2>验证</h2>
+  <!-- 每条实际运行过的命令一行，结果写通过/失败和关键数字；没跑的写「未运行」和原因。 -->
+  <div class="scroll">
+  <table>
+    <thead><tr><th>命令</th><th>结果</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>pytest -q tests/test_example.py</code></td><td class="ok">通过</td><td>12 passed</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <!-- 必要时贴关键输出片段（截取，不超过 40 行）。 -->
+  <pre>……</pre>
+</section>
+
+<section>
+  <h2>风险与未决</h2>
+  <!-- 已知问题、未覆盖的情况、可能影响到的其他模块。没有就写「无已知风险」。 -->
+  <ul><li>……</li></ul>
+</section>
+
+<section>
+  <h2>请指挥重点审阅</h2>
+  <!-- 你最不确定、最希望 Opus 检查的 1 到 3 处，给出文件和行号。 -->
+  <ul><li>……</li></ul>
+</section>
+
+<section>
+  <h2>下一步</h2>
+  <!-- 审阅通过后准备做什么。 -->
+  <p>……</p>
+</section>
+</main>
+</body>
+</html>

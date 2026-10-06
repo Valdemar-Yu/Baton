@@ -1,0 +1,9 @@
+{
+  "_comment": "council.skill config used with Baton. chief forks the main (Opus) session; councilors are functions from ~/.local/bin/council-def.sh.",
+  "chief_model": "Opus",
+  "chief_backend": "",
+  "councilors": [
+    "council-cc-opus",
+    "council-codex-sol"
+  ]
+}

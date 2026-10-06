@@ -1,0 +1,27 @@
+{
+  "_comment": "Baton defaults. A project can override any key except quota.* in <project>/.baton/config.json (deep-merged). quota is per account and read from this file only; BATON_QUOTA_WARN_PERCENT and BATON_DESKTOP_NOTIFY=0 override it per shell.",
+  "executor": {
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "xhigh",
+    "service_tier": "default",
+    "disable_fast_mode": true,
+    "sandbox": "workspace-write",
+    "network_access": false,
+    "extra_config": []
+  },
+  "supervision": {
+    "interval_minutes": 30,
+    "max_unsupervised_minutes": 70,
+    "test_command": ""
+  },
+  "quota": {
+    "warn_remaining_percent": 5,
+    "cache_seconds": 120,
+    "desktop_notify": true
+  },
+  "change_size": {
+    "major_files": 4,
+    "major_lines": 200
+  },
+  "language": "中文"
+}
