@@ -45,7 +45,7 @@ LEG_END_EVENTS = {
 }
 NEXT_STEP = {
     "DONE": "按 references/review.md 做最终验收（diff + 测试），再向用户汇报；不要自行提交。",
-    "DECISION": "读决策请求文件，按 references/decision.md 决策（重大决策用 council），然后 baton resume。",
+    "DECISION": "读决策请求文件，按 references/decision.md 决策（按 judge.council_for_major_decisions 决定是否用 council），然后 baton resume。",
     "REPORT": "按 references/review.md 审阅汇报 HTML，写 .baton/reviews/ 审阅意见，然后 baton resume。",
     "BLOCKED": "看 summary 里缺什么；能解决就解决后 baton resume，涉及权限/网络/费用先问用户。",
     "FAILED": "看错误和 stderr 末尾判断原因（额度、网络、参数）；修正后 baton resume 重试本轮。",
@@ -166,6 +166,13 @@ def die(msg, code=1):
     sys.stdout.flush()
     print(f"baton: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+class ConfigError(Exception):
+    """A project configuration error that should be shown to the caller."""
+
+
+JUDGE_MODELS = {"opus", "sonnet", "haiku", "fable"}
 
 
 def run(cmd, cwd=None, env=None, check=True, input_text=None):
@@ -326,7 +333,50 @@ class Project:
     @property
     def config(self):
         base = read_json(os.path.join(SKILL_DIR, "config.json"), {})
-        return deep_merge(base, read_json(os.path.join(self.dir, "config.json"), {}))
+        project_cfg = read_json(os.path.join(self.dir, "config.json"), {})
+        if not isinstance(project_cfg, dict):
+            project_cfg = {}
+        baton_cfg = self.read_baton_config()
+        # quota belongs to the account-level skill configuration.  Keep the
+        # project layers from changing it even though all other keys deep-merge.
+        project_cfg = {k: v for k, v in project_cfg.items() if k != "quota"}
+        baton_cfg = {k: v for k, v in baton_cfg.items() if k != "quota"}
+        cfg = deep_merge(deep_merge(base, project_cfg), baton_cfg)
+        judge = cfg.get("judge")
+        if not isinstance(judge, dict):
+            raise ConfigError("配置中的 judge 必须是 JSON object")
+        judge_model = judge.get("model")
+        if judge_model not in JUDGE_MODELS:
+            raise ConfigError(
+                f"judge.model 的值 {judge_model!r} 无效，只能是 opus、sonnet、haiku 或 fable"
+            )
+        return cfg
+
+    @property
+    def baton_config_path(self):
+        return os.path.join(self.root, "baton.json")
+
+    def read_baton_config(self):
+        path = self.baton_config_path
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ConfigError(f"{path} 不是合法 JSON：第 {e.lineno} 行第 {e.colno} 列：{e.msg}") from e
+        except OSError as e:
+            raise ConfigError(f"无法读取 {path}：{e}") from e
+        if not isinstance(data, dict):
+            raise ConfigError(f"{path} 顶层必须是 JSON object，实际是 {type(data).__name__}")
+        return data
+
+    def config_paths(self):
+        return [
+            (os.path.join(SKILL_DIR, "config.json"), True),
+            (os.path.join(self.dir, "config.json"), os.path.exists(os.path.join(self.dir, "config.json"))),
+            (self.baton_config_path, os.path.exists(self.baton_config_path)),
+        ]
 
     def p(self, *parts):
         return os.path.join(self.dir, *parts)
@@ -775,14 +825,34 @@ def write_baton_gitignore(project):
 
 
 def cmd_init(project, args):
+    # Validate an existing baton.json before changing the project state.  When
+    # it is absent, the skill defaults and any existing .baton override form
+    # the values used for the generated file below.
+    project.config
     for d in ("tasks", "reports", "reviews", "decisions", "runs"):
         os.makedirs(project.p(d), exist_ok=True)
     write_baton_gitignore(project)
     if not os.path.exists(project.p("config.json")):
         write_json(project.p("config.json"), {
-            "_comment": "Project overrides for Baton (any key of the skill's config.json except quota.*).",
-            "executor": {"network_access": False},
-            "supervision": {"test_command": ""},
+            "_comment": "Project overrides for Baton. Put model and test settings in <project>/baton.json; quota.* is ignored in project files.",
+        })
+    if not os.path.exists(project.baton_config_path):
+        cfg = project.config
+        write_json(project.baton_config_path, {
+            "judge": {
+                "model": cfg["judge"]["model"],
+                "council_for_major_decisions": cfg["judge"].get("council_for_major_decisions", True),
+            },
+            "executor": {
+                "model": cfg["executor"]["model"],
+                "reasoning_effort": cfg["executor"]["reasoning_effort"],
+                "service_tier": cfg["executor"]["service_tier"],
+                "disable_fast_mode": cfg["executor"].get("disable_fast_mode", True),
+                "network_access": cfg["executor"].get("network_access", False),
+            },
+            "supervision": {
+                "test_command": cfg["supervision"].get("test_command", ""),
+            },
         })
     if not os.path.exists(project.p("log.md")):
         with open(project.p("log.md"), "w") as f:
@@ -896,9 +966,11 @@ def launch_leg(project, task, kind, prompt):
         def set_pid(s):
             current_leg(s)["runner_pid"] = runner.pid
         project.update_state(task, set_pid)
-    ex = project.config["executor"]
+    cfg = project.config
+    ex = cfg["executor"]
     print(f"BATON::STARTED task={task} leg={n} kind={kind} model={ex['model']} "
-          f"effort={ex['reasoning_effort']} service_tier={ex['service_tier']} runner_pid={runner.pid}")
+          f"effort={ex['reasoning_effort']} service_tier={ex['service_tier']} "
+          f"judge={cfg['judge']['model']} runner_pid={runner.pid}")
     print(f"回滚点：{start_ref or '无'}")
     print(f"下一步：用后台方式运行 `baton wait {task}`，leg 结束或 "
           f"{project.config['supervision']['interval_minutes']} 分钟监管时间到会唤醒你。")
@@ -1571,6 +1643,24 @@ def cmd_list(project, args):
               + (f"  最新：{leg['status']} @ {stamp(leg['started_at'])}" if leg else ""))
 
 
+def cmd_config(project, args):
+    cfg = project.config
+    judge = cfg["judge"]
+    ex = cfg["executor"]
+    print(f"BATON::CONFIG judge={judge['model']} executor={ex['model']} effort={ex['reasoning_effort']}")
+    if args.json:
+        print(json.dumps(cfg, ensure_ascii=False, indent=2))
+        return
+    print(f"judge.model：{judge['model']}")
+    print(f"judge.council_for_major_decisions：{judge.get('council_for_major_decisions')}")
+    for key in ("model", "reasoning_effort", "service_tier", "disable_fast_mode", "network_access", "sandbox"):
+        print(f"executor.{key}：{ex.get(key)}")
+    print(f"supervision.test_command：{cfg['supervision'].get('test_command', '')}")
+    print("配置层：")
+    for path, exists in project.config_paths():
+        print(f"- {path}：{'存在' if exists else '缺失'}")
+
+
 def cmd_quota(project, args):
     argv = (["--json"] if args.json else []) + (["--refresh"] if args.refresh else []) + ["--notify"]
     sys.exit(codex_quota.main(argv))
@@ -1616,7 +1706,15 @@ def cmd_doctor(project, args):
     line("OK" if codex else "FAIL", f"codex CLI：{codex or '未安装'}")
     if codex:
         line("OK", run(["codex", "--version"], check=False).strip())
-    ex = project.config["executor"]
+    try:
+        cfg = project.config
+    except ConfigError as e:
+        line("FAIL", str(e))
+        sys.exit(1)
+    ex = cfg["executor"]
+    baton_state = "存在" if os.path.exists(project.baton_config_path) else "缺失"
+    line("OK" if baton_state == "存在" else "WARN",
+         f"judge 模型：{cfg['judge']['model']}；baton.json：{baton_state}（{project.baton_config_path}）")
     cache = read_json(os.path.expanduser("~/.codex/models_cache.json"), {})
     models = cache.get("models", cache) if isinstance(cache, dict) else cache
     model = next((m for m in models or [] if isinstance(m, dict) and m.get("slug") == ex["model"]), None)
@@ -1705,6 +1803,8 @@ def main():
     s.add_argument("ref")
     s.add_argument("--yes", action="store_true")
     sub.add_parser("list", help="列出任务")
+    s = sub.add_parser("config", help="显示生效配置")
+    s.add_argument("--json", action="store_true", help="输出完整合并后的 JSON 配置")
     s = sub.add_parser("quota", help="Codex 额度")
     s.add_argument("--json", action="store_true")
     s.add_argument("--refresh", action="store_true")
@@ -1718,12 +1818,15 @@ def main():
         "init": cmd_init, "statusline": cmd_statusline, "new": cmd_new, "start": cmd_start,
         "resume": cmd_resume, "steer": cmd_steer, "wait": cmd_wait, "status": cmd_status,
         "supervised": cmd_supervised, "stop": cmd_stop, "checkpoint": cmd_checkpoint, "refs": cmd_refs,
-        "diff": cmd_diff, "rollback": cmd_rollback, "list": cmd_list, "quota": cmd_quota,
+        "diff": cmd_diff, "rollback": cmd_rollback, "list": cmd_list, "config": cmd_config, "quota": cmd_quota,
         "doctor": cmd_doctor, "_run": cmd_run,
     }[args.cmd]
     if args.cmd == "steer":
         args.kind = "纠偏"
-    handler(project, args)
+    try:
+        handler(project, args)
+    except ConfigError as e:
+        die(str(e))
 
 
 if __name__ == "__main__":

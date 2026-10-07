@@ -1,22 +1,22 @@
 ---
 name: baton
 description: >-
-  Claude（Opus 5.5）当指挥和裁判，在终端里通过 Codex CLI 让 GPT-6.1-Sol（思考深度 xhigh，不开加速）执行编码任务。
-  负责写任务简报、后台启动 codex exec、每 30 分钟监管防止执行者跑偏或改坏代码、处理执行者提交的决策请求（重大决策用 council skill）、
+  Claude（默认 Opus）当指挥和裁判，在终端里通过 Codex CLI 让 gpt-6.1-sol（默认思考深度 xhigh，不开加速）执行编码任务；指挥和执行者模型可由项目根目录的 baton.json 配置。
+  负责写任务简报、后台启动 codex exec、每 30 分钟监管防止执行者跑偏或改坏代码、处理执行者提交的决策请求（可由 baton.json 关闭重大决策 council）、
   审阅执行者每次大修改后写的 HTML 汇报、检查小修改是否记入 log，Codex 额度低于 5% 时提醒用户。
   触发：让 codex 干活、指挥 codex、交给 codex / GPT 执行、Claude 监工 Codex、/baton、delegate to codex。
 ---
 
-# Baton：Opus 指挥，Codex 执行
+# Baton：可配置模型的指挥与执行
 
-你（主会话，应当是 Opus 5.5）是指挥和裁判：定方案、做决策、审阅、监管，不亲手写任务代码。执行者是 Codex CLI 里的 `gpt-6.1-sol`，思考深度 `xhigh`，`service_tier="default"` 且禁用 `fast_mode`（不开加速）。这些参数在 `${CLAUDE_SKILL_DIR}/config.json`，项目可在 `.baton/config.json` 覆盖。
+你（主会话，默认是 Opus）是指挥和裁判：定方案、做决策、审阅、监管，不亲手写任务代码。执行者默认是 Codex CLI 里的 `gpt-6.1-sol`，思考深度 `xhigh`，`service_tier="default"` 且禁用 `fast_mode`（不开加速）。默认值在 `${CLAUDE_SKILL_DIR}/config.json`，项目配置按 skill `config.json` → `.baton/config.json` → 项目根 `baton.json` 深度合并；`baton.json` 可以覆盖 judge、executor 和 supervision 设置。
 
 命令行工具是 `baton`（`${CLAUDE_SKILL_DIR}/bin/baton`，`install.sh` 会链接到 `~/.local/bin/baton`）。在目标项目目录下运行。`baton doctor` 提示 PATH 上的 baton 不是本 skill 的时，改用 `${CLAUDE_SKILL_DIR}/bin/baton`。
 
 ## 启动
 
-1. 自检：`baton doctor`。有 FAIL 先解决。主会话不是 Opus 时提醒用户切换（`/model opus`）。
-2. 初始化：`baton init`（可重复执行）。它同时配置本项目的 statusline：把 `.claude/settings.local.json` 的 statusLine 换成 Baton 的包装脚本，原来的 statusline 保留为第一行，第二行显示 Codex 额度；输出里说需要重开会话时转告用户。用户不想改 statusline 就用 `baton init --no-statusline`。项目有测试命令就写进 `.baton/config.json` 的 `supervision.test_command`。任务需要联网（装依赖、下载数据）时把 `executor.network_access` 设为 `true`，并告诉用户。
+1. 自检并读配置：先运行 `baton doctor`，再运行 `baton config`。有 FAIL 先解决；从输出读取 `judge.model`。主会话模型与 `judge.model` 不一致时提醒用户切换（例如 `/model opus`）。在用户切换前，DECISION、REPORT、DONE 的裁判工作通过 Agent 工具派生子 agent，并把 `model` 参数设为 `judge.model`；主会话只转述子 agent 的结论。重大决策仅在 `judge.council_for_major_decisions=true` 时调用 council。
+2. 初始化：`baton init`（可重复执行）。它同时创建项目根 `baton.json`（已有文件不覆盖）并配置本项目的 statusline：把 `.claude/settings.local.json` 的 statusLine 换成 Baton 的包装脚本，原来的 statusline 保留为第一行，第二行显示 Codex 额度；输出里说需要重开会话时转告用户。用户不想改 statusline 就用 `baton init --no-statusline`。项目有测试命令就写进 `baton.json` 的 `supervision.test_command`。任务需要联网（装依赖、下载数据）时把 `executor.network_access` 设为 `true`，并告诉用户。
 3. 写简报：先读必要的代码弄清现状，再 `baton new <task>`，填满 `.baton/tasks/<task>/brief.md` 每一节，不留「（待填）」。验收标准要能检查，范围写清允许和禁止修改的路径。需求有歧义先问用户。把简报要点用两三句告诉用户。
 4. 启动：`baton start <task>`。
 5. 守候：用 Bash 的 `run_in_background: true` 运行 `baton wait <task>`，然后结束本回合，告诉用户执行者已开始、下一次监管大约在什么时候。不要在前台 sleep 轮询；`wait` 结束时你会被唤醒。
@@ -57,7 +57,8 @@ description: >-
 | 命令 | 作用 |
 |---|---|
 | `baton doctor` | 环境自检：codex、模型与思考深度、加速是否关闭、额度、council、git |
-| `baton init [--no-statusline]` | 创建 `.baton/`，配置带 Codex 额度行的项目 statusline |
+| `baton config [--json]` | 查看配置层、模型与生效配置（`--json` 输出完整合并配置） |
+| `baton init [--no-statusline]` | 创建 `.baton/`，在缺失时创建 `baton.json`，配置带 Codex 额度行的项目 statusline |
 | `baton statusline install/uninstall/status` | 单独安装、撤销、查看项目 statusline；settings.local.json 被 git 跟踪时默认不改，需 `--force` |
 | `baton new <task>` | 生成简报模板 |
 | `baton start <task>` | 首轮：`codex exec`，建回滚点，后台运行 |
@@ -86,6 +87,25 @@ description: >-
   rollback-backup/       回滚前被改写或删除的文件原样备份（已 gitignore）
   statusline-saved.json  安装 statusline 前项目原有的 statusLine，供撤销时恢复
 .claude/settings.local.json   项目 statusline（本机文件，已写入 .git/info/exclude）
+baton.json              项目模型与执行设置（由 baton init 创建，可提交到项目）
 ```
 
 回滚点是 git ref：`refs/baton/<task>/{base,leg-NNN-start,leg-NNN-end,tick-*}`，不影响分支和暂存区。
+
+## 配置
+
+配置按 skill `config.json` → `<root>/.baton/config.json` → `<root>/baton.json` 深度合并，后者覆盖前者。两个项目层里的 `quota.*` 都忽略，额度只读 skill 配置。根目录没有 `baton.json` 时，`baton init` 会写入当前生效的默认值；已有文件不会覆盖。`baton config` 打印摘要和各层路径，`baton config --json` 输出完整合并配置。
+
+```json
+{
+  "judge": {"model": "opus", "council_for_major_decisions": true},
+  "executor": {
+    "model": "gpt-6.1-sol", "reasoning_effort": "xhigh",
+    "service_tier": "default", "disable_fast_mode": true,
+    "network_access": false
+  },
+  "supervision": {"test_command": ""}
+}
+```
+
+`judge.model` 只能是 `opus`、`sonnet`、`haiku`、`fable`；`executor.model` 不在 Baton 内置白名单中，由 `doctor` 对照本机 `models_cache` 检查。

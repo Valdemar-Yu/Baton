@@ -102,10 +102,28 @@ Codex gpt-6.1-sol·xhigh │ 7d 剩余 92% █████████░ ↻3d1
 
 ## 配置
 
-默认值在 `skills/baton/config.json`。除 `quota` 一节外，项目都可以在 `.baton/config.json` 里覆盖；额度按账号计算，`quota` 只读 skill 自己的配置。
+默认值在 `skills/baton/config.json`。项目根目录的 `baton.json` 是模型和执行设置的配置层，合并顺序（后者覆盖前者，深度合并）是 skill `config.json` → `<root>/.baton/config.json` → `<root>/baton.json`。两个项目层里的 `quota.*` 都忽略，额度按账号计算，只读 skill 自己的配置。`baton config` 查看生效摘要和配置层，`baton config --json` 输出完整合并配置。
+
+`baton init` 在项目根目录没有 `baton.json` 时写入一份带当前生效默认值的文件，已有文件不会覆盖。常用字段如下：
+
+```json
+{
+  "judge": {"model": "opus", "council_for_major_decisions": true},
+  "executor": {
+    "model": "gpt-6.1-sol", "reasoning_effort": "xhigh",
+    "service_tier": "default", "disable_fast_mode": true,
+    "network_access": false
+  },
+  "supervision": {"test_command": ""}
+}
+```
+
+`judge.model` 只能使用 `opus`、`sonnet`、`haiku`、`fable`；`executor.model` 不在 Baton 内置白名单中，由 `baton doctor` 对照本机 `models_cache` 检查。`baton.json` 不加入任何 gitignore，由项目自行决定是否提交。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
+| `judge.model` | `opus` | 指挥与裁判模型别名：opus / sonnet / haiku / fable |
+| `judge.council_for_major_decisions` | `true` | 是否为重大决策调用 council |
 | `executor.model` | `gpt-6.1-sol` | 执行者模型 |
 | `executor.reasoning_effort` | `xhigh` | 该模型支持 low / medium / high / xhigh / max / ultra |
 | `executor.service_tier` | `default` | 标准速度；Fast 档对应 `priority` |
@@ -132,6 +150,7 @@ Codex gpt-6.1-sol·xhigh │ 7d 剩余 92% █████████░ ↻3d1
   reviews/                Opus 的审阅意见与最终验收
   decisions/D<NNN>-*.md   决策请求与指挥决定
   runs/<task>/            每轮的 prompt、Codex 事件流、最终输出、stderr（已 gitignore）
+baton.json              项目模型与执行设置（由 baton init 创建，可提交到项目）
 ```
 
 ## 命令
@@ -139,7 +158,8 @@ Codex gpt-6.1-sol·xhigh │ 7d 剩余 92% █████████░ ↻3d1
 | 命令 | 作用 |
 |---|---|
 | `baton doctor` | 检查 codex、模型与思考深度、加速是否关闭、额度、council、git |
-| `baton init` / `baton new <task>` | 初始化 `.baton/` 并配置项目 statusline，生成简报模板 |
+| `baton config [--json]` | 查看配置层、模型与生效配置（`--json` 输出完整合并配置） |
+| `baton init` / `baton new <task>` | 初始化 `.baton/`、在缺失时创建 `baton.json` 并配置项目 statusline，生成简报模板 |
 | `baton statusline install/uninstall/status [--force]` | 单独管理项目 statusline 的 Codex 额度行 |
 | `baton start <task>` | 首轮 |
 | `baton resume <task> <file> --kind 决策/审阅/纠偏` | 带指挥消息续跑 |

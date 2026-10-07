@@ -1,5 +1,9 @@
 {
-  "_comment": "Baton defaults. A project can override any key except quota.* in <project>/.baton/config.json (deep-merged). quota is per account and read from this file only; BATON_QUOTA_WARN_PERCENT and BATON_DESKTOP_NOTIFY=0 override it per shell.",
+  "_comment": "Baton defaults. Configuration deep-merges in this order: this skill config.json, <project>/.baton/config.json, then <project>/baton.json. Project quota.* is ignored; quota is per account and read from this file only. BATON_QUOTA_WARN_PERCENT and BATON_DESKTOP_NOTIFY=0 override it per shell.",
+  "judge": {
+    "model": "opus",
+    "council_for_major_decisions": true
+  },
   "executor": {
     "model": "gpt-6.1-sol",
     "reasoning_effort": "xhigh",
