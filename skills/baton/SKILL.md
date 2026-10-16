@@ -43,9 +43,11 @@ hermes -p baton-exec-v2 auth remove openai-codex <从根目录带进来的条目
 
 ```markdown
 ```baton-scope
-{"allow":["src"],"deny":["data"],"acceptance":["tests"],"frozen":[],"verify":"auto"}
+{"allow":["src"],"deny":["data"],"acceptance":["tests"],"frozen":[],"unfreeze":[],"verify":"auto"}
 ```
 ```
+
+`unfreeze` 是可选的已有测试文件精确路径列表，文件名必须符合 `test_*`、`*_test.*`、`*.spec.*` 或 `*.test.*`，只能列出原本会被 `supervision.test_command` 自动冻结的测试文件；不接受 glob、目录、路径不存在或 conftest.py、pytest.ini、tox.ini、pyproject/setup.cfg 的 pytest 段、package.json 的 test 键等测试配置。非空时必须用 `baton start <task> --user-approved`，并在 `/dev/tty` 逐字确认任务名。解除冻结的文件会记入 state 和 charter.md、不会进入 freeze manifest，但删除测试、减少测试数量、跳过测试等 ALERT 仍然生效。
 
 确认简报后启动并交给后台等待：
 

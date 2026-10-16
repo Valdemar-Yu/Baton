@@ -53,8 +53,9 @@ SHADOW_EXCLUDE_DEFAULTS = [
     ".venv*/", "venv/", "node_modules/", "__pycache__/", "*.pyc", ".DS_Store",
     "/data/", "/models/", "outputs/", "logs/", "checkpoints/",
 ]
-SCOPE_KEYS = {"allow", "deny", "acceptance", "frozen", "verify"}
-SCOPE_LIST_KEYS = {"allow", "deny", "acceptance", "frozen"}
+SCOPE_KEYS = {"allow", "deny", "acceptance", "frozen", "unfreeze", "verify"}
+SCOPE_LIST_KEYS = {"allow", "deny", "acceptance", "frozen", "unfreeze"}
+SCOPE_REQUIRED_LIST_KEYS = SCOPE_LIST_KEYS - {"unfreeze"}
 FROZEN_WHOLE_NAMES = {"conftest.py", "pytest.ini", "tox.ini"}
 HERMES_NAMES = {".hermes.md", "HERMES.md", "AGENTS.md", "CLAUDE.md", ".cursorrules"}
 DEPENDENCY_NAMES = ("requirements", "Pipfile", "poetry.lock", "package-lock.json", "yarn.lock",
@@ -885,6 +886,12 @@ def _unseal_dossier(root):
 def _charter_text(project, task, st):
     brief = read_text(os.path.join(project.task_dir(task), "brief.md"), "")
     chunks = ["# 冻结章程\n\n", brief]
+    unfreeze = list(st.get("unfreeze") or (st.get("scope") or {}).get("unfreeze") or [])
+    if unfreeze:
+        chunks.extend(["\n\n## 已批准解除冻结的测试文件\n\n",
+                       "以下文件原本会因 test_command 自动冻结；本任务已按启动时的用户确认解除其整文件冻结。\n\n",
+                       "\n".join("- " + path for path in unfreeze),
+                       "\n删测试、减少测试数量、跳过测试等 ALERT 规则仍然适用。"])
     for amendment in st.get("amendments") or []:
         path = amendment.get("path") if isinstance(amendment, dict) else None
         if path:
@@ -931,6 +938,34 @@ def _scope_findings(project, task, st, baseline, end_ref):
     return violations
 
 
+LOG_EVIDENCE_MAX_CHARS = 8000
+
+
+def _log_evidence_lines(project, offset):
+    """Render log.md bytes after an auditable byte offset for a dossier."""
+    log_path = project.p("log.md")
+    try:
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    current_size = file_size(log_path)
+    lines = ["## log.md 新增"]
+    if current_size < offset:
+        lines.append("log.md 被改写或截断（当前文件比记录偏移量短）。")
+        return lines
+    new_log = read_bytes_since(log_path, offset)
+    if new_log is None:
+        lines.append("log.md 被改写或截断（无法读取记录偏移量之后的内容）。")
+    elif not new_log:
+        lines.append("本轮无新增")
+    else:
+        if len(new_log) > LOG_EVIDENCE_MAX_CHARS:
+            lines.append("log.md 新增超过 8000 字符，已保留末尾 8000 字符（前文已截断）。")
+            new_log = new_log[-LOG_EVIDENCE_MAX_CHARS:]
+        lines.append(new_log.rstrip("\n"))
+    return lines
+
+
 def _evidence_text(project, task, st, leg, dossier_kind, baseline):
     verify = leg.get("verify") or {}
     lines = []
@@ -960,6 +995,11 @@ def _evidence_text(project, task, st, leg, dossier_kind, baseline):
     lines += ["", "## 本轮的外部动作"]
     external = leg.get("external_actions") or []
     lines += [f"- {json.dumps(action, ensure_ascii=False, sort_keys=True)}" for action in external] or ["无"]
+    log_offset = leg.get("log_size_at_start")
+    if log_offset is None:
+        supervision = st.get("supervision") or {}
+        log_offset = supervision.get("log_offset", 0)
+    lines += [""] + _log_evidence_lines(project, log_offset)
     lines += ["", "## 轮中检查", "无"]
     lines += ["", "## 汇报性质", "report.html 是执行者的当事人陈述"]
     return "\n".join(lines) + "\n"
@@ -1627,10 +1667,45 @@ def run_monitor_check_lifecycle(project, task, dossier_id, cfg, leg_n):
     return False
 
 
-def _check_event_record(project, task, dossier_id, value, brief_path=""):
+def _normalize_midleg_check(value):
+    """Downgrade completion/record gaps before applying a live direction check."""
+    original_conclusion = value.get("conclusion")
+    findings = []
+    downgraded = []
+    for finding in value.get("findings") or []:
+        item = dict(finding)
+        if item.get("category") in {"acceptance_gap", "missing_record"}:
+            severity = item.get("severity")
+            if severity != "note":
+                item["severity"] = "note"
+            downgraded.append({"id": item.get("id"), "category": item.get("category"),
+                               "from": severity, "to": "note"})
+        findings.append(item)
+    normalized = dict(value)
+    normalized["findings"] = findings
+    remaining_blocking = any(item.get("severity") == "blocking"
+                             and item.get("category") not in {"acceptance_gap", "missing_record"}
+                             for item in findings)
+    if downgraded and original_conclusion in {"drifting", "breaking"} and not remaining_blocking:
+        normalized["conclusion"] = "on_track"
+    return normalized, {
+        "original_conclusion": original_conclusion,
+        "downgrade": {
+            "applied": bool(downgraded),
+            "finding_ids": [item["id"] for item in downgraded],
+            "reason": "轮中检查不把验收缺口或记录缺口当作方向偏离",
+            "findings": downgraded,
+        },
+    }
+
+
+def _check_event_record(project, task, dossier_id, value, brief_path="", audit=None):
+    audit = audit or {"original_conclusion": value.get("conclusion"),
+                      "downgrade": {"applied": False, "finding_ids": [], "reason": "", "findings": []}}
     return append_ledger(project, {"type": "check", "task": task, "dossier": dossier_id,
         "dossier_hash": dossier_manifest(project, dossier_id).get("total_sha256", ""),
-        "conclusion": value.get("conclusion"), "summary": value.get("summary", ""),
+        "conclusion": value.get("conclusion"), "original_conclusion": audit["original_conclusion"],
+        "downgrade": audit["downgrade"], "summary": value.get("summary", ""),
         "findings": value.get("findings") or [], "brief_path": brief_path})
 
 
@@ -1648,6 +1723,7 @@ def _persist_leg_stop_reason(project, task, leg_n, reason):
 
 def apply_monitor_check_result(project, task, dossier_id, value, leg_n):
     """Persist a successful check and apply its conclusion to the running leg."""
+    value, audit = _normalize_midleg_check(value)
     conclusion = value.get("conclusion")
     brief_path = ""
     if conclusion in {"drifting", "breaking"}:
@@ -1655,7 +1731,7 @@ def apply_monitor_check_result(project, task, dossier_id, value, leg_n):
         os.makedirs(os.path.dirname(brief_path), exist_ok=True)
         with open(brief_path, "w", encoding="utf-8") as stream:
             stream.write(render_monitor_check(project, task, dossier_id, value))
-    record = _check_event_record(project, task, dossier_id, value, brief_path)
+    record = _check_event_record(project, task, dossier_id, value, brief_path, audit)
     def update(state):
         leg = next((item for item in state.get("legs", []) if item.get("n") == leg_n), None)
         if leg is None:
@@ -1665,6 +1741,8 @@ def apply_monitor_check_result(project, task, dossier_id, value, leg_n):
                       "conclusion": conclusion, "summary": value.get("summary", ""),
                       "findings": len(value.get("findings") or []), "brief_path": brief_path,
                       "ledger_seq": record.get("seq")})
+        check["original_conclusion"] = audit["original_conclusion"]
+        check["downgrade"] = audit["downgrade"]
         leg["monitor_check"] = check
         leg["monitor_check_failures"] = 0
         state["supervision_fallback"] = False
@@ -1690,7 +1768,9 @@ def apply_monitor_check_result(project, task, dossier_id, value, leg_n):
             current_interval = float(supervision.get("first_check_minutes", 10))
         leg["check_interval_minutes"] = current_interval
         leg["next_check_at"] = now() + current_interval * 60
-        leg["last_check"] = {"dossier": dossier_id, "conclusion": conclusion, "at": now(), "brief_path": brief_path}
+        leg["last_check"] = {"dossier": dossier_id, "conclusion": conclusion,
+                              "original_conclusion": audit["original_conclusion"],
+                              "downgrade": audit["downgrade"], "at": now(), "brief_path": brief_path}
         leg["check_baseline_ref"] = leg.get("probe_commit") or leg.get("check_baseline_ref")
     project.update_state(task, update)
     if conclusion == "breaking":
@@ -2032,6 +2112,12 @@ def _check_evidence_text(project, task, st, leg, baseline, probe_ref):
                   + (f"（raw: {item.get('raw')}）" if item.get("raw") and item.get("raw") != item.get("command") else "")
                   + f" @ {item.get('time')}" for item in calls] or ["无"])
     lines += ["", "## 冻结检查", freeze_summary(check_freeze(project, task, st)) or "无"]
+    supervision = st.get("supervision") or {}
+    if supervision.get("leg") == leg.get("n") and supervision.get("log_offset") is not None:
+        log_offset = supervision.get("log_offset")
+    else:
+        log_offset = leg.get("log_size_at_start", 0)
+    lines += [""] + _log_evidence_lines(project, log_offset)
     return "\n".join(lines) + "\n"
 
 
@@ -3856,14 +3942,17 @@ def _probe_changed_stats(store, old_ref, new_ref, path):
 
 
 def _is_test_file(path):
-    """Whether a Python path is a test file for destructive-rule accounting."""
+    """Whether a path is a test file for destructive-rule accounting."""
     normalized = path.replace(os.sep, "/")
-    if not normalized.endswith(".py"):
+    name = normalized.rsplit("/", 1)[-1].lower()
+    filename_test = (name.startswith("test_")
+                     or re.fullmatch(r".+_test\..+", name) is not None
+                     or re.fullmatch(r".+\.spec\..+", name) is not None
+                     or re.fullmatch(r".+\.test\..+", name) is not None)
+    if not normalized.endswith(".py") and not filename_test:
         return False
     parts = normalized.split("/")
-    name = parts[-1]
-    return (name.startswith("test_") or name.endswith("_test.py")
-            or len(parts) > 1 and parts[-2] in {"test", "tests"})
+    return (filename_test or len(parts) > 1 and parts[-2] in {"test", "tests"})
 
 
 def _new_report_file(project, started_at):
@@ -4107,6 +4196,28 @@ def _capacity_event(ev):
     return ""
 
 
+CAPACITY_FAILURE_PATTERNS = (
+    re.compile(r"\bat\s+capacity\b", re.I),
+    re.compile(r"overloaded", re.I),
+    re.compile(r"\b(?:http\s+529|status\s+529)\b", re.I),
+    re.compile(r"\b503\s+service\s+unavailable\b", re.I),
+)
+CAPACITY_FAILURE_EXCLUSIONS = (
+    re.compile(r"usage\s+limit", re.I),
+    re.compile(r"quota\s+exceeded", re.I),
+    re.compile(r"insufficient_quota", re.I),
+    re.compile(r"额度", re.I),
+)
+
+
+def is_capacity_message(text):
+    """Match transient capacity errors without treating quota exhaustion as capacity."""
+    text = str(text or "")
+    if any(pattern.search(text) for pattern in CAPACITY_FAILURE_EXCLUSIONS):
+        return False
+    return any(pattern.search(text) for pattern in CAPACITY_FAILURE_PATTERNS)
+
+
 def is_capacity_failure(events_path, stderr_path, event_offset=0, stderr_offset=0,
                         returncode=0, result=None):
     """Detect a capacity failure using only bytes written by one Codex call.
@@ -4121,7 +4232,7 @@ def is_capacity_failure(events_path, stderr_path, event_offset=0, stderr_offset=
     messages = [_capacity_event(ev) for ev in events]
     stdout = read_bytes_since(events_path, event_offset) or ""
     stderr = read_bytes_since(stderr_path, stderr_offset) or ""
-    return any("at capacity" in message.lower() for message in messages + [stdout, stderr])
+    return any(is_capacity_message(message) for message in messages + [stdout, stderr])
 
 
 def capacity_retry_config(cfg):
@@ -4209,14 +4320,16 @@ def parse_scope(brief, required=True):
     unknown = sorted(set(data) - SCOPE_KEYS)
     if unknown:
         raise ConfigError("baton-scope 有未知键：" + ", ".join(unknown))
-    missing = sorted(SCOPE_LIST_KEYS - set(data))
+    missing = sorted(SCOPE_REQUIRED_LIST_KEYS - set(data))
     if missing:
         raise ConfigError("baton-scope 缺少键：" + ", ".join(missing))
     out = {}
     for key in SCOPE_LIST_KEYS:
-        value = data.get(key)
+        value = data.get(key, []) if key == "unfreeze" else data.get(key)
         if not isinstance(value, list):
             raise ConfigError(f"范围块 {key} 必须是 JSON array")
+        if key == "unfreeze" and any(any(char in str(item) for char in "*?[") for item in value):
+            raise ConfigError("范围块 unfreeze 只能使用已有文件的精确路径，不接受 glob")
         out[key] = [_scope_path(x, key) for x in value]
     verify = data.get("verify", "auto")
     if verify not in ("auto", "none"):
@@ -4384,6 +4497,38 @@ def _test_command_paths(project, command, all_files=None):
     return _glob_paths(project, paths, all_files)
 
 
+def _is_unfreezable_test_path(path):
+    """Whether a test_command path is a test file rather than a source/config file."""
+    normalized = path.replace(os.sep, "/")
+    name = os.path.basename(normalized).lower()
+    return (name.startswith("test_")
+            or re.fullmatch(r".+_test\..+", name) is not None
+            or re.fullmatch(r".+\.spec\..+", name) is not None
+            or re.fullmatch(r".+\.test\..+", name) is not None)
+
+
+def _validate_unfreeze(project, scope, cfg, all_files=None):
+    """Validate exact user-approved test files that would otherwise be auto-frozen."""
+    paths = list((scope or {}).get("unfreeze") or [])
+    if not paths:
+        return []
+    all_files = list(all_files if all_files is not None else _walk_code_files(project))
+    auto_frozen = _test_command_paths(project, (cfg.get("supervision") or {}).get("test_command", ""), all_files)
+    valid = []
+    for path in paths:
+        full = os.path.join(project.root, path)
+        if any(char in path for char in "*?["):
+            raise ConfigError(f"unfreeze 只能使用已有文件的精确路径：{path}")
+        if path not in all_files or not os.path.isfile(full) or os.path.islink(full):
+            raise ConfigError(f"unfreeze 路径不存在或不是项目内已有文件：{path}")
+        if _is_config_candidate(path):
+            raise ConfigError(f"unfreeze 不能指向测试配置文件：{path}")
+        if path not in auto_frozen or not _is_unfreezable_test_path(path):
+            raise ConfigError(f"unfreeze 只能指向 test_command 原本会冻结的测试文件：{path}")
+        valid.append(path)
+    return valid
+
+
 def _monitor_parts(path, root):
     """Hashable named parts for monitor-level files."""
     name = os.path.basename(path)
@@ -4416,6 +4561,7 @@ def _monitor_parts(path, root):
 
 def _freeze_manifest(project, scope, cfg):
     all_files = list(_walk_code_files(project))
+    unfreeze = _validate_unfreeze(project, scope, cfg, all_files)
     frozen = set(_glob_paths(project, scope.get("acceptance", []), all_files))
     frozen.update(_glob_paths(project, scope.get("frozen", []), all_files))
     configured = ((cfg.get("freeze") or {}).get("paths") or [])
@@ -4423,6 +4569,7 @@ def _freeze_manifest(project, scope, cfg):
         raise ConfigError("freeze.paths 必须是路径字符串数组")
     frozen.update(_glob_paths(project, configured, all_files))
     frozen.update(_test_command_paths(project, (cfg.get("supervision") or {}).get("test_command", ""), all_files))
+    frozen.difference_update(unfreeze)
     monitor = set()
     for path in all_files:
         name = os.path.basename(path)
@@ -6698,6 +6845,11 @@ def cmd_start(project, args):
     scope = parse_scope(brief, required=not bool(st.get("legs")))
     if scope and scope.get("verify") == "auto" and not (cfg.get("supervision") or {}).get("test_command"):
         die("supervision.test_command 为空；范围块 verify=auto 时必须配置验证命令，或写 verify=none")
+    unfreeze = _validate_unfreeze(project, scope or {}, cfg)
+    if unfreeze:
+        if not getattr(args, "user_approved", False):
+            die("范围块 unfreeze 会放宽自动冻结，请加 `baton start %s --user-approved` 并在 /dev/tty 逐字确认任务名" % args.task)
+        _require_task_confirmation(args.task)
     if st.get("thread_id"):
         die(f"任务 {args.task} 已有 Codex 会话 {st['thread_id']}；继续请用 baton resume")
     r = subprocess.run(["git", "check-ref-format", f"refs/baton/{args.task}/base"])
@@ -6712,7 +6864,8 @@ def cmd_start(project, args):
         if not st.get("legs"):
             # a task started by v2 keeps every checkpoint in the shadow repo
             st = project.update_state(args.task, lambda s: s.update(snapshot_store="shadow", task=args.task,
-                                                                       scope=scope or {}, config_snapshot=cfg,
+                                                                       scope=scope or {}, unfreeze=unfreeze,
+                                                                       config_snapshot=cfg,
                                                                        config_input_hash=config_input_hash(project)))
             write_freeze_baseline(project, args.task, scope or {}, cfg)
             manifest = read_json(os.path.join(freeze_dir(project, args.task), "manifest.json"), {}) or {}
@@ -8923,6 +9076,8 @@ def main():
     s.add_argument("--brief", help="用已有文件作为简报")
     s = sub.add_parser("start", help="启动首轮（codex exec）")
     s.add_argument("task")
+    s.add_argument("--user-approved", action="store_true",
+                   help="范围块含 unfreeze 时，确认用户批准解除测试文件冻结")
     for name, helptext in (("resume", "带指挥消息续跑（codex exec resume）"), ("steer", "停止当前轮并带纠偏消息续跑")):
         s = sub.add_parser(name, help=helptext)
         s.add_argument("task")
