@@ -7,6 +7,7 @@ host Python 3.9 and gives the dossier/rule paths one normalised representation.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -45,6 +46,9 @@ def _decode_block(raw: str) -> Any:
         match = re.search(pattern, raw, re.I | re.S)
         if match:
             raw = match.group(1).strip()
+            if pattern.startswith("<pre"):
+                # Text inside <pre> is HTML: &quot; and &amp; are escaped characters.
+                raw = html.unescape(raw)
             break
     try:
         return json.loads(raw)

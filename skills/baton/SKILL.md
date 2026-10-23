@@ -141,6 +141,7 @@ baton rule <task> <curation-dossier> <verdict-file> --curation
 | `baton supervised <task> --verdict ...` | 记录 TICK 监管结论 |
 | `baton restore-frozen` / `baton amend` | 恢复冻结或提交用户核准的修正案 |
 | `baton close <task>` | 验收通过后关闭任务 |
+| `baton close <task> --abandon "<原因>"` | 不再继续、也不会有 ACCEPT 终审的任务（如以 REPORT 结束）：账本记一条 abandon，任务 closed，清理卷宗代码 |
 | `baton memory install/verify/reindex` | 安装、校验、重建记忆索引 |
 
 ## 文件布局

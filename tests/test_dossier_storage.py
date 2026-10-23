@@ -96,6 +96,36 @@ class DossierStorageTests(unittest.TestCase):
         self.assertEqual((self.root / ".git" / "index").read_bytes(), git_index)
         self.assertEqual(store.git("show", ref + ":evidence/raw.bin"), "x" * 4096)
 
+    @unittest.skipUnless(os.name == "nt", "Windows ACL behaviour")
+    def test_dossier_code_directories_keep_inherited_acl(self):
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+        store = self.project.store("t")
+        ref = store.snapshot("subdirectory")
+        # TemporaryDirectory is itself owner-only on Windows; use a parent with an ordinary ACL.
+        parent = Path(tempfile.gettempdir()) / f"baton-acl-{os.getpid()}-{id(self)}"
+        self.addCleanup(shutil.rmtree, parent, True)
+        target = parent / "copy"
+        baton._dossier_code_snapshot(store, ref, str(target))
+        acl = subprocess.run(["icacls", str(target / "pkg")], capture_output=True, text=True,
+                             encoding="mbcs").stdout
+        self.assertIn("(I)", acl)
+
+    @unittest.skipUnless(os.name == "nt", "Windows MAX_PATH behaviour")
+    def test_dossier_snapshot_records_paths_beyond_max_path(self):
+        (self.root / "keep.py").write_text("x = 1\n", encoding="utf-8")
+        (self.root / "deep").mkdir()
+        (self.root / "deep" / ("f" * 120 + ".txt")).write_text("tmp\n", encoding="utf-8")
+        store = self.project.store("t")
+        ref = store.snapshot("long path")
+        parent = Path(tempfile.gettempdir()) / f"baton-long-{os.getpid()}-{id(self)}"
+        self.addCleanup(shutil.rmtree, parent, True)
+        target = parent / ("d" * max(1, 200 - len(str(parent))))
+        omissions = baton._dossier_code_snapshot(store, ref, str(target))
+        self.assertTrue((target / "keep.py").is_file())
+        self.assertEqual(omissions["long_paths"]["files"], 1)
+        self.assertEqual(omissions["long_paths"]["examples"], ["deep/" + "f" * 120 + ".txt"])
+
     def test_non_git_dossier_keeps_ignored_files(self):
         shutil.rmtree(self.root / ".git")
         (self.root / "evidence").mkdir()
@@ -208,6 +238,35 @@ class DossierStorageTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             baton.cmd_gc(self.project, argparse.Namespace(dry_run=False))
         self.assertIn("已清理 0 份卷宗代码", output.getvalue())
+
+    def test_gc_prunes_interrupted_dossier_without_manifest(self):
+        ident = self.build(kind="check")
+        root = self.dossier(ident)
+        baton._unseal_dossier(str(root))
+        (root / "manifest.json").unlink()
+        self.project.update_state("t", lambda s: s.update(status="closed"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            baton.cmd_gc(self.project, argparse.Namespace(dry_run=False))
+        self.assertFalse((root / "code").exists())
+        self.assertFalse((root / "manifest.json").exists())
+
+    def test_prune_retries_transient_directory_not_empty(self):
+        ident = self.build(kind="check")
+        root = self.dossier(ident)
+        real_rmtree = shutil.rmtree
+        calls = []
+
+        def flaky(path, *args, **kwargs):
+            calls.append(path)
+            if len(calls) == 1:
+                raise OSError(145, "directory not empty")
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(baton.shutil, "rmtree", flaky), patch.object(baton.time, "sleep"):
+            removed = baton._prune_dossier_code(self.project, ident, "closed")
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(removed["files"] > 0)
+        self.assertFalse((root / "code").exists())
 
     def test_gc_recognizes_old_report_ownership_from_ledger_and_state(self):
         reports = []

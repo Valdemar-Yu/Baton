@@ -24,6 +24,44 @@ def codex_readonly_config():
     return ["-c", 'windows.sandbox="unelevated"'] if os.name == "nt" else []
 
 
+class _ConsoleTTY:
+    """The Windows console as one tty-like object (CONIN$ in, CONOUT$ out)."""
+
+    def __init__(self):
+        self._in = open("CONIN$", "r", encoding="utf-8")
+        try:
+            self._out = open("CONOUT$", "w", encoding="utf-8")
+        except OSError:
+            self._in.close()
+            raise
+
+    def write(self, text):
+        self._out.write(text)
+
+    def flush(self):
+        self._out.flush()
+
+    def readline(self):
+        return self._in.readline()
+
+    def close(self):
+        try:
+            self._out.close()
+        finally:
+            self._in.close()
+
+
+def tty_name():
+    return "CONIN$" if os.name == "nt" else "/dev/tty"
+
+
+def open_tty():
+    """The user's terminal, bypassing redirected stdin/stdout."""
+    if os.name == "nt":
+        return _ConsoleTTY()
+    return open("/dev/tty", "r+", encoding="utf-8")
+
+
 def executable(name):
     """Windows must never execute npm .cmd/.ps1 shims (TOML quoting is lost)."""
     if os.name != "nt":

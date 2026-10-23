@@ -253,7 +253,7 @@ class FreezeTests(unittest.TestCase):
                          adopt=["conftest.py"], user_approved=True)
         before = Path(self.project.state_path("t")).read_bytes()
         with patch.object(baton, "_open_tty", side_effect=OSError("无控制终端")), \
-                self.assertRaisesRegex(baton.ConfigError, "无法打开 /dev/tty"):
+                self.assertRaisesRegex(baton.ConfigError, r"无法打开 (/dev/tty|CONIN\$)"):
             baton.cmd_amend(self.project, args)
         self.assertEqual(Path(self.project.state_path("t")).read_bytes(), before)
         wrong_tty = Mock()
@@ -271,6 +271,25 @@ class FreezeTests(unittest.TestCase):
         correct_tty.close.assert_called_once()
         self.assertFalse(baton.check_freeze(self.project, "t")["violations"])
         self.assertEqual((Path(baton.freeze_dir(self.project, "t")) / "files/conftest.py").read_text(), "x=2\n")
+
+    def test_open_tty_uses_console_devices_on_windows(self):
+        opened = []
+
+        def fake_open(path, mode, encoding=None):
+            opened.append((path, mode))
+            return Mock()
+
+        with patch.object(baton.platform_support.os, "name", "nt"), \
+                patch("builtins.open", side_effect=fake_open):
+            tty = baton.platform_support.open_tty()
+            tty.write("q")
+            tty.readline()
+            tty.close()
+        self.assertEqual(opened, [("CONIN$", "r"), ("CONOUT$", "w")])
+        with patch.object(baton.platform_support.os, "name", "posix"), \
+                patch("builtins.open", side_effect=fake_open):
+            baton.platform_support.open_tty()
+        self.assertEqual(opened[-1], ("/dev/tty", "r+"))
 
     def test_amend_validates_config_and_classifies_relaxations(self):
         manifest = self.baseline()

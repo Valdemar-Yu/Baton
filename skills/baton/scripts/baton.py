@@ -371,7 +371,8 @@ def validate_config(cfg):
 
 
 def run(cmd, cwd=None, env=None, check=True, input_text=None):
-    p = subprocess.run(cmd, cwd=cwd, env=env, input=input_text, capture_output=True, text=True, encoding="utf-8")
+    p = subprocess.run(cmd, cwd=cwd, env=env, input=input_text, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
     if check and p.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd)} failed: {p.stderr.strip()[:400]}")
     return p.stdout
@@ -790,6 +791,10 @@ def _dossier_write(path, text, binary=False):
             stream.write(text)
 
 
+_WIN_MAX_PATH = 260  # MAX_PATH incl. the terminating NUL
+_WIN_MAX_DIR = 248   # CreateDirectory leaves room for an 8.3 file name
+
+
 def _dossier_code_snapshot(store, ref, target):
     omissions = {"files": 0, "bytes": 0, "reason": "项目 git ignore 规则忽略的未跟踪文件"}
     os.makedirs(target, exist_ok=True)
@@ -828,6 +833,20 @@ def _dossier_code_snapshot(store, ref, target):
                     continue
                 destination = os.path.realpath(os.path.join(target, name))
                 if destination != os.path.realpath(target) and not destination.startswith(os.path.realpath(target) + os.sep):
+                    continue
+                if os.name == "nt" and len(destination) >= (_WIN_MAX_DIR if member.isdir() else _WIN_MAX_PATH):
+                    # Without LongPathsEnabled the copy cannot be created (e.g. deep pytest basetemp dirs).
+                    if not member.isdir():
+                        long_paths = omissions.setdefault("long_paths", {"files": 0, "bytes": 0, "examples": []})
+                        long_paths["files"] += 1
+                        long_paths["bytes"] += member.size
+                        if len(long_paths["examples"]) < 5:
+                            long_paths["examples"].append(name)
+                    continue
+                if member.isdir():
+                    # tarfile creates directories with mode 0o700, which on Windows (Python 3.12.4+) becomes an
+                    # owner-only ACL that the monitor's sandbox cannot read; makedirs keeps the inherited ACL.
+                    os.makedirs(destination, exist_ok=True)
                     continue
                 archive.extract(member, target)
     finally:
@@ -912,6 +931,21 @@ def _unseal_dossier(root):
             pass
 
 
+def _rmtree_retry(path, attempts=5, delay=0.5):
+    # On Windows a file still held open (scanner, indexer, a just-exited monitor) is only marked for deletion,
+    # so removing its directory can fail with "directory not empty" (WinError 145) until the handle closes.
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def _prune_dossier_code(project, dossier_id, reason, dry_run=False):
     root = dossier_path(project, dossier_id)
     code = os.path.join(root, "code")
@@ -923,17 +957,20 @@ def _prune_dossier_code(project, dossier_id, reason, dry_run=False):
              for directory, _, names in os.walk(code) for name in names]
     removed = {"files": len(sizes), "bytes": sum(sizes), "reason": reason, "at": now()}
     if not dry_run:
-        manifest = dossier_manifest(project, dossier_id)
-        if not manifest.get("files"):
+        incomplete = not os.path.exists(os.path.join(root, "manifest.json"))
+        manifest = {} if incomplete else dossier_manifest(project, dossier_id)
+        if not incomplete and not manifest.get("files"):
             raise RuntimeError("卷宗缺少文件清单，不能清理：" + dossier_id)
         os.chmod(root, 0o755)
         try:
             _unseal_dossier(code)
-            shutil.rmtree(code)
-            # Keep the original inventory/hash so existing ledger bindings still resolve.
-            manifest["code_pruned"] = removed
-            os.chmod(os.path.join(root, "manifest.json"), 0o644)
-            write_json(os.path.join(root, "manifest.json"), manifest)
+            _rmtree_retry(code)
+            # An interrupted build has no manifest and nothing bound to it in the ledger; otherwise
+            # keep the original inventory/hash so existing ledger bindings still resolve.
+            if not incomplete:
+                manifest["code_pruned"] = removed
+                os.chmod(os.path.join(root, "manifest.json"), 0o644)
+                write_json(os.path.join(root, "manifest.json"), manifest)
         finally:
             _seal_dossier(root)
     return removed
@@ -5192,14 +5229,14 @@ def _config_assignment(value):
 
 
 def _open_tty():
-    return open("/dev/tty", "r+", encoding="utf-8")
+    return platform_support.open_tty()
 
 
 def _require_task_confirmation(task):
     try:
         tty = _open_tty()
     except OSError as e:
-        raise ConfigError(f"需要在真实终端逐字确认任务名；无法打开 /dev/tty：{e}") from e
+        raise ConfigError(f"需要在真实终端逐字确认任务名；无法打开 {platform_support.tty_name()}：{e}") from e
     try:
         tty.write(f"确认放宽任务 {task}？请逐字输入任务名：")
         tty.flush()
@@ -5279,7 +5316,7 @@ def cmd_amend(project, args):
     if not (assignments or amendment_text or adopt):
         die("amend 至少需要修正案文件、--config 或 --adopt")
     if relax and not args.user_approved:
-        die("这是放宽冻结或验证标准的操作，请加 --user-approved 并在 /dev/tty 逐字确认任务名")
+        die("这是放宽冻结或验证标准的操作，请加 --user-approved 并在真实终端逐字确认任务名")
     if args.user_approved:
         _require_task_confirmation(args.task)
     if adopt:
@@ -7791,6 +7828,20 @@ def cmd_monitor(project, args):
     dossier = dossier_path(project, args.dossier)
     if not os.path.isdir(dossier):
         die(f"找不到卷宗 {args.dossier}")
+    if args.rerun and not os.path.isfile(os.path.join(dossier, "manifest.json")):
+        # A dossier whose build failed (e.g. invalid memory candidates) is rebuilt from the leg.
+        status = leg.get("executor_status") or leg.get("status")
+        if dossier_id_for(project, args.task, leg, status) != args.dossier:
+            die(f"卷宗 {args.dossier} 缺少 manifest，且不是当前轮次的卷宗，不能重建")
+        try:
+            rebuilt = build_dossier(project, args.task, st, leg, status)
+        except ConfigError as exc:
+            die(f"重建卷宗 {args.dossier} 失败：{exc}")
+        if rebuilt != args.dossier:
+            die(f"重建卷宗 {args.dossier} 失败：得到 {rebuilt}")
+        project.update_state(args.task, lambda s: current_leg(s).update(
+            dossier={"id": rebuilt, "type": dossier_type_for(status)}))
+        print(f"已重建卷宗 {args.dossier}")
     brief_path = project.p("reviews", args.dossier + "-brief.md")
     if os.path.exists(brief_path) and not args.rerun:
         die(f"卷宗 {args.dossier} 已有监督简报；需要重跑请加 --rerun")
@@ -7908,7 +7959,10 @@ def cmd_status(project, args):
     print(f"任务状态：{st.get('status')}；Codex 会话：{st.get('thread_id') or '未知'}；共 {len(st.get('legs', []))} 轮")
     if st.get("status") == "closed":
         closed = st.get("closed") or {}
-        print(f"任务已 closed：终审 {closed.get('dossier') or '未知'}，账本 seq {closed.get('ledger_seq') or '未知'}")
+        if closed.get("abandoned"):
+            print(f"任务已按放弃 closed（未终审）：{closed.get('reason')}，账本 seq {closed.get('ledger_seq') or '未知'}")
+        else:
+            print(f"任务已 closed：终审 {closed.get('dossier') or '未知'}，账本 seq {closed.get('ledger_seq') or '未知'}")
     revision_counts = _revision_counts(project, task)
     if revision_counts:
         print("REVISE 累计：" + "，".join(f"{k}={v}" for k, v in sorted(revision_counts.items())))
@@ -8136,6 +8190,16 @@ def cmd_close(project, args):
                 (leg.get("n"), leg.get("status"), json.dumps(monitor_value, ensure_ascii=False)))
     if not verify_ledger(project):
         die("账本校验失败，不能 close")
+    reason = getattr(args, "abandon", None)
+    if reason is not None:
+        if not reason.strip():
+            die("--abandon 需要写明放弃原因")
+        record = append_ledger(project, {"type": "abandon", "task": task, "reason": reason.strip()})
+        project.update_state(task, lambda s: s.update(status="closed", closed={"abandoned": True,
+            "reason": reason.strip(), "ledger_seq": record.get("seq"), "at": now()}))
+        prune_closed_task(project, task)
+        print(f"任务 {task} 已按放弃 closed（未终审，账本 seq {record.get('seq')}）：{reason.strip()}")
+        return
     dossiers = _final_dossiers(project, task)
     if not dossiers:
         die("没有终审卷宗，不能 close")
@@ -9191,6 +9255,8 @@ def main():
     s.add_argument("task")
     s = sub.add_parser("close", help="验收通过后关闭任务")
     s.add_argument("task")
+    s.add_argument("--abandon", metavar="REASON",
+                   help="没有 ACCEPT 终审也关闭（如以 REPORT 结束的任务），写入账本并清理卷宗代码")
     s = sub.add_parser("gc", help="清理已 closed 任务的卷宗代码，保留记录和账本")
     s.add_argument("--dry-run", action="store_true", help="只列出将清理的卷宗、文件数和字节数")
     s = sub.add_parser("supervised", help="记录一次监管结论并重置计时")
