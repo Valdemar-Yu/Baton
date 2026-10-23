@@ -1,3 +1,5 @@
+from platform_fixtures import wait_windows_pid
+from platform_fixtures import executable_fixture
 import contextlib
 import io
 import json
@@ -18,6 +20,8 @@ import baton  # noqa: E402
 
 
 def wait_for_pid(pid, timeout=30):
+    if os.name == "nt":
+        return wait_windows_pid(pid, timeout)
     if not pid:
         return
     deadline = time.time() + timeout
@@ -58,7 +62,7 @@ class MonitorTests(unittest.TestCase):
             "```baton-scope\n" + json.dumps({"allow": ["a.py"], "deny": [], "acceptance": [],
                                                     "frozen": [], "verify": "none"}) + "\n```\n# t\n",
             encoding="utf-8")
-        self.env = patch.dict(os.environ, {"HOME": str(self.home), "BATON_HOME": str(self.state),
+        self.env = patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home), "BATON_HOME": str(self.state),
                                            "PYTHONDONTWRITEBYTECODE": "1"}, clear=False)
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -115,7 +119,7 @@ elif behavior == 'invalid':
 else:
     json.dump({'summary':'monitor ok','recommendation':'APPROVE','findings':[],'memory_advice':[]}, open(out, 'w'))
 """, encoding="utf-8")
-        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        script = executable_fixture(script)
         self.env_path = patch.dict(os.environ, {"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", "")}, clear=False)
         self.env_path.start()
         self.addCleanup(self.env_path.stop)
@@ -237,11 +241,11 @@ else:
         bindir = Path(self.tmp.name) / "probe-bin"
         bindir.mkdir()
         codex = bindir / "codex"
-        codex.write_text("#!/usr/bin/env python3\nimport json,os,sys\nout=sys.argv[sys.argv.index('-o')+1]; mode=os.environ.get('BATON_PROBE_MODE','none')\nif mode == 'fail':\n print(json.dumps({'type':'turn.failed','error':{'message':'probe capacity'}})); sys.exit(1)\nopen(out,'w').write({'visible':'小标题','first':'# Global','none':'NONE'}[mode])\n", encoding="utf-8")
-        codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+        codex.write_text("#!/usr/bin/env python3\nimport json,os,sys\nout=sys.argv[sys.argv.index('-o')+1]; mode=os.environ.get('BATON_PROBE_MODE','none')\nif mode == 'fail':\n print(json.dumps({'type':'turn.failed','error':{'message':'probe capacity'}})); sys.exit(1)\nopen(out,'w',encoding='utf-8').write({'visible':'小标题','first':'# Global','none':'NONE'}[mode] + '\\n' + open('charter.md',encoding='utf-8').read())\n", encoding="utf-8")
+        codex = executable_fixture(codex)
         claude = bindir / "claude"
         claude.write_text("#!/usr/bin/env python3\nimport json,sys\nschema=sys.argv[sys.argv.index('--json-schema')+1]\njson.loads(schema)\nprint(json.dumps({'type':'system','subtype':'init','tools':['Glob','Grep','Read','StructuredOutput'],'mcp_servers':[],'permissionMode':'dontAsk'}))\n", encoding="utf-8")
-        claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
+        claude = executable_fixture(claude)
         valid_claude_command = baton._monitor_claude_command(self.project, "monitor-probe", self.cfg(model="haiku"), stream=True)
         bad_claude_command = list(valid_claude_command)
         bad_claude_command[bad_claude_command.index("--json-schema") + 1] = str(ROOT / "skills/baton/templates/monitor-brief.schema.json")
@@ -254,6 +258,7 @@ else:
             messages = []
             result = baton.run_monitor_probe(self.project, self.cfg(), lambda level, msg: messages.append((level, msg)))
         self.assertTrue(result["claude_ok"])
+        self.assertTrue(result["codex_dossier_read"])
         self.assertTrue(result["codex_global_instructions"])
         self.assertTrue(Path(result["codex_events"]).exists())
         self.assertTrue(Path(result["claude_stream"]).exists())

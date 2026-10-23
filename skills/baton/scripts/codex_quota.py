@@ -22,9 +22,13 @@ import subprocess
 import sys
 import time
 
+import baton_platform as platform_support
+
+platform_support.utf8_stdio()
+
 try:
     import fcntl
-except ImportError:  # non-POSIX: run without locking
+except ImportError:  # Windows uses msvcrt.locking below
     fcntl = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,7 +45,7 @@ CODEX_BIN = os.environ.get("BATON_CODEX_BIN", "codex")
 
 def skill_config():
     try:
-        with open(os.path.join(SKILL_DIR, "config.json")) as f:
+        with open(os.path.join(SKILL_DIR, "config.json"), encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -141,15 +145,17 @@ def apply_resets(data, now=None):
 def fetch_live(timeout=15.0):
     """Ask a short-lived `codex app-server` for the account's rate limits."""
     try:
-        proc = subprocess.Popen([CODEX_BIN, "app-server"], stdin=subprocess.PIPE,
+        proc = subprocess.Popen([platform_support.executable(CODEX_BIN), "app-server"], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except OSError:
+    except OSError as e:
+        if os.name == "nt":
+            print(f"[fail] Codex quota launch: {e}; falling back to cached/rollout data", file=sys.stderr)
         return None
     fd = proc.stdout.fileno()
     buf = b""
 
     def send(obj):
-        proc.stdin.write((json.dumps(obj) + "\n").encode())
+        proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
         proc.stdin.flush()
 
     def wait_for(msg_id, deadline):
@@ -170,7 +176,10 @@ def fetch_live(timeout=15.0):
             left = deadline - time.time()
             if left <= 0:
                 return None
-            ready, _, _ = select.select([fd], [], [], min(0.5, left))
+            if os.name == "nt":
+                ready = platform_support.pipe_ready(fd, min(0.5, left))
+            else:
+                ready, _, _ = select.select([fd], [], [], min(0.5, left))
             if ready:
                 chunk = os.read(fd, 65536)
                 if not chunk:
@@ -199,14 +208,21 @@ def fetch_live(timeout=15.0):
         })
         data["limit_id"] = result["rateLimits"].get("limitId")
         return data
-    except Exception:  # noqa: BLE001 — any surprise in the reply just means "no live reading"
+    except Exception as e:  # quota is advisory, but diagnostics must not disappear
+        if os.name == "nt":
+            print(f"[fail] Codex live quota: {e}; falling back to cached/rollout data", file=sys.stderr)
         return None
     finally:
         try:
             proc.kill()
             proc.wait(timeout=3)
-        except Exception:
-            pass
+        except Exception as e:
+            if os.name == "nt":
+                print(f"[fail] Quota process cleanup: {e}", file=sys.stderr)
+        finally:
+            if os.name == "nt":
+                proc.stdin.close()
+                proc.stdout.close()
 
 
 def _record_time(obj, fallback):
@@ -269,7 +285,7 @@ def _ensure_cache_dir():
 
 def load_cache():
     try:
-        with open(CACHE_FILE) as f:
+        with open(CACHE_FILE, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -278,9 +294,9 @@ def load_cache():
 def save_cache(data):
     _ensure_cache_dir()
     tmp = CACHE_FILE + f".{os.getpid()}.tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f)
-    os.replace(tmp, CACHE_FILE)
+    platform_support.atomic_replace(tmp, CACHE_FILE)
 
 
 def _live_recently_failed():
@@ -293,8 +309,10 @@ def _live_recently_failed():
 def refresh(notify=False):
     """Fetch live (fallback rollout) under a non-blocking lock. None if another refresh runs."""
     _ensure_cache_dir()
-    lock = open(LOCK_FILE, "w")
+    lock = open(LOCK_FILE, "a+b") if os.name == "nt" else open(LOCK_FILE, "w", encoding="utf-8")
     try:
+        if os.name == "nt" and not platform_support.lock_file(lock, blocking=False):
+            return None  # another refresh owns the cache
         if fcntl:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -308,7 +326,7 @@ def refresh(notify=False):
             except OSError:
                 pass
         else:
-            with open(LIVE_FAIL_MARK, "w"):
+            with open(LIVE_FAIL_MARK, "w", encoding="utf-8"):
                 pass
             cached = load_cache()
             roll = fetch_rollout()
@@ -336,13 +354,14 @@ def spawn_refresh():
     except OSError:
         pass
     try:
-        with open(SPAWN_MARK, "w"):
+        with open(SPAWN_MARK, "w", encoding="utf-8"):
             pass
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "--refresh", "--notify", "--quiet"],
+        platform_support.detached_popen([sys.executable, os.path.abspath(__file__), "--refresh", "--notify", "--quiet"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        pass
+                         stderr=subprocess.DEVNULL)
+    except OSError as e:
+        if os.name == "nt":
+            print(f"[fail] Quota background refresh: {e}; keeping cached reading", file=sys.stderr)
 
 
 def get(max_age=None, block=True, notify=False):
@@ -434,6 +453,8 @@ def describe(data, threshold=None):
 
 def maybe_notify(data, threshold=None):
     """Desktop notification once per low window (a window is identified by its reset time)."""
+    if os.name == "nt":
+        return False  # no desktop integration; never block a runner or statusline
     keys = low_window_keys(data, threshold)
     if not keys:
         return False
@@ -441,7 +462,7 @@ def maybe_notify(data, threshold=None):
             or not skill_config().get("quota", {}).get("desktop_notify", True):
         return False
     try:
-        with open(NOTIFY_FILE) as f:
+        with open(NOTIFY_FILE, encoding="utf-8") as f:
             seen = set(json.load(f).get("keys") or [])
     except Exception:
         seen = set()
@@ -467,7 +488,7 @@ def maybe_notify(data, threshold=None):
             return True
     live = {k for k in seen | set(keys) if current(k)}
     _ensure_cache_dir()
-    with open(NOTIFY_FILE, "w") as f:
+    with open(NOTIFY_FILE, "w", encoding="utf-8") as f:
         json.dump({"keys": sorted(live), "at": now}, f)
     return True
 

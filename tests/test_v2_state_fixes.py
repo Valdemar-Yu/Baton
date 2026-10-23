@@ -1,3 +1,4 @@
+from platform_fixtures import executable_fixture
 """Regression tests for the issues found by the independent review of phase 1 (v2-state)."""
 import contextlib
 import hashlib
@@ -52,7 +53,7 @@ class Base(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(os.path.realpath(tmp.name))
-        env = patch.dict(os.environ, {"HOME": str(self.tmp / "home"), "BATON_HOME": str(self.tmp / "state")})
+        env = patch.dict(os.environ, {"HOME": str(self.tmp / "home"), "USERPROFILE": str(self.tmp / "home"), "BATON_HOME": str(self.tmp / "state")})
         env.start()
         self.addCleanup(env.stop)
 
@@ -385,7 +386,7 @@ class StateSafetyTests(Base):
         shutil.copytree(original, copied)
         bindir = self.tmp / "bin"
         write(bindir / "codex", "#!/bin/sh\nexit 0\n")
-        os.chmod(bindir / "codex", 0o755)
+        executable_fixture(bindir / "codex")
         env = clean_env(HOME=str(self.tmp / "home"), BATON_HOME=str(self.tmp / "state"),
                         PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""))
         for command in ("config", "doctor"):
@@ -496,7 +497,7 @@ class CliEndToEndTests(Base):
                 fh.write("\\n## fake · minor · edit\\n")
             json.dump({"status": "report", "summary": "fake", "artifact": "", "change_size": "minor"}, open(out, "w"))
             '''))
-        os.chmod(bindir / "codex", 0o755)
+        executable_fixture(bindir / "codex")
         outer = self.tmp / "outer"
         outer.mkdir()
         git(outer, "init", "-q")

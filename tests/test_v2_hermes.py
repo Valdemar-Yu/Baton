@@ -1,3 +1,5 @@
+from platform_fixtures import directory_link
+from platform_fixtures import executable_fixture
 import contextlib
 import base64
 import io
@@ -52,7 +54,7 @@ class HermesTests(unittest.TestCase):
         self.calls = self.root / "hermes.calls"
         self._write_fake_hermes()
         self.env = patch.dict(os.environ, {
-            "HOME": str(self.home), "BATON_HOME": str(self.state), "HERMES_HOME": str(self.hermes_home),
+            "HOME": str(self.home), "USERPROFILE": str(self.home), "BATON_HOME": str(self.state), "HERMES_HOME": str(self.hermes_home),
             "HERMES_PYTHON": sys.executable, "HERMES_AGENT_DIR": str(self.agent),
             "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
             "PYTHONDONTWRITEBYTECODE": "1", "BATON_DESKTOP_NOTIFY": "0",
@@ -106,7 +108,7 @@ print("session_id: fake-session", file=sys.stderr)
 '''
         path = self.bin / "hermes"
         path.write_text(script, encoding="utf-8")
-        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        path = executable_fixture(path)
         os.environ["FAKE_HERMES_CALLS"] = str(self.calls)
 
     def _project(self, backend=True):
@@ -147,6 +149,7 @@ print("session_id: fake-session", file=sys.stderr)
             time.sleep(0.05)
         return state, [json.loads(line) for line in self.calls.read_text().splitlines() if json.loads(line) and "chat" in json.loads(line)]
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_init_creates_profile_without_clone_and_files_readonly(self):
         project = self._init()
         profile = Path(baton.hermes_profile_dir(project.config))
@@ -161,6 +164,7 @@ print("session_id: fake-session", file=sys.stderr)
         self.assertNotIn("--clone-from", create)
         self.assertNotIn("--clone-all", create)
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_existing_profile_is_skipped_and_mismatch_warns_without_overwrite(self):
         project = self._init()
         before = len(self.calls.read_text().splitlines())
@@ -175,6 +179,7 @@ print("session_id: fake-session", file=sys.stderr)
         self.assertEqual(stat.S_IMODE(soul.stat().st_mode), 0o644)
         self.assertIn("未覆盖", out.getvalue())
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_existing_hermes_default_soul_is_replaced_even_when_readonly(self):
         project = self._init()
         soul = Path(baton.hermes_profile_dir(project.config)) / "SOUL.md"
@@ -185,6 +190,7 @@ print("session_id: fake-session", file=sys.stderr)
         self.assertEqual(soul.read_text(), baton.hermes_soul_text())
         self.assertEqual(stat.S_IMODE(soul.stat().st_mode), 0o444)
 
+    @unittest.skipIf(os.name == "nt", "Hermes profile initialization unsupported on Windows")
     def test_scan_hit_refuses_soul_write(self):
         project = self._project()
         os.environ["FAKE_SCAN"] = "1"
@@ -202,6 +208,7 @@ print("session_id: fake-session", file=sys.stderr)
         (self.project_root / "HERMES.md").unlink()
         self.assertEqual(baton.hermes_context_files(project), [str(baton.canonical_dir(self.project_root / "AGENTS.md"))])
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_auth_hash_and_doctor_checks(self):
         self.hermes_home.mkdir(exist_ok=True)
         (self.hermes_home / "auth.json").write_text('{"root":"x"}', encoding="utf-8")
@@ -215,6 +222,7 @@ print("session_id: fake-session", file=sys.stderr)
         version_lines = [msg for _, msg in lines if msg.startswith("Hermes 版本：")]
         self.assertEqual(version_lines, ["Hermes 版本：Hermes v0.20.1"])
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_account_ids_use_jwt_and_preflight_rejects_mismatch(self):
         project = self._init()
         cfg = project.config
@@ -284,6 +292,7 @@ print("session_id: fake-session", file=sys.stderr)
         err.write_text("", encoding="utf-8")
         self.assertTrue(baton.is_capacity_failure(str(out), str(err), returncode=1))
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_runner_corrects_one_invalid_result_and_resumes(self):
         state, calls = self._run_cli_mode("invalid_once")
         self.assertEqual(state["legs"][-1]["status"], "done")
@@ -292,11 +301,13 @@ print("session_id: fake-session", file=sys.stderr)
         query = next(item for item in calls[1] if item.startswith("--query="))
         self.assertIn("缺少字段", query)
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_runner_marks_two_invalid_results_failed(self):
         state, calls = self._run_cli_mode("invalid_always")
         self.assertEqual(state["legs"][-1]["status"], "failed")
         self.assertEqual(len(calls), 2)
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_runner_nonzero_hermes_exit_does_not_resume(self):
         state, calls = self._run_cli_mode("exit1")
         self.assertEqual(state["legs"][-1]["status"], "failed")
@@ -311,6 +322,7 @@ print("session_id: fake-session", file=sys.stderr)
         self.assertFalse(error)
         self.assertEqual(baton.hermes_session_id("session_id: old\nnoise\nsession_id: newest\n"), "newest")
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_preflight_rejects_env_auth_count_and_missing_web_search(self):
         project = self._init()
         cfg = project.config
@@ -410,9 +422,11 @@ print("session_id: fake-session", file=sys.stderr)
         self.assertEqual(path.read_text(encoding="utf-8"), before)
 
     def test_state_db_terminal_calls_follow_compression_chain(self):
-        project = self._init()
+        project = self._project(backend=False)
+        baton.cmd_init(project, self._args())
         cfg = project.config
         db = Path(baton.hermes_profile_dir(cfg)) / "state.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(db)
         conn.executescript("""
         create table sessions (id text primary key, parent_session_id text);
@@ -433,6 +447,7 @@ print("session_id: fake-session", file=sys.stderr)
         actions = baton.external_action_findings(["refs/remotes/a"], ["refs/remotes/b"], [{"command":"ssh host", "exit_code":0}])
         self.assertEqual({item["type"] for item in actions}, {"remote_refs_changed", "external_command"})
 
+    @unittest.skipIf(os.name == "nt", "Hermes execution/profile backend unsupported on Windows; no Hermes installed")
     def test_real_cli_hermes_executor_end_to_end(self):
         project = self._project()
         cli = [sys.executable, str(ROOT / "skills/baton/scripts/baton.py"), "--root", str(self.project_root)]
@@ -527,7 +542,7 @@ print("session_id: fake-session", file=sys.stderr)
         actual = self.root / "real-project"
         actual.mkdir()
         link = self.root / "project-link"
-        link.symlink_to(actual, target_is_directory=True)
+        directory_link(link, actual)
         project = baton.Project(str(link))
         cfg = self._project().config
         defines = baton.hermes_sandbox_defines(project, cfg)

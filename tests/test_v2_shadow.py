@@ -37,7 +37,7 @@ class ShadowRepoTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
-        env = patch.dict(os.environ, {"HOME": str(self.tmp / "home"), "BATON_HOME": str(self.tmp / "state")})
+        env = patch.dict(os.environ, {"HOME": str(self.tmp / "home"), "USERPROFILE": str(self.tmp / "home"), "BATON_HOME": str(self.tmp / "state")})
         env.start()
         self.addCleanup(env.stop)
 
@@ -202,7 +202,7 @@ class ProjectMarkerTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
-        env = patch.dict(os.environ, {"HOME": str(self.tmp / "home"), "BATON_HOME": str(self.tmp / "state")})
+        env = patch.dict(os.environ, {"HOME": str(self.tmp / "home"), "USERPROFILE": str(self.tmp / "home"), "BATON_HOME": str(self.tmp / "state")})
         env.start()
         self.addCleanup(env.stop)
 
@@ -233,6 +233,21 @@ class ProjectMarkerTests(unittest.TestCase):
                             "config"], env=env, text=True, capture_output=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("项目外状态目录", p.stdout)
+
+
+class GitOutputDecodingTests(unittest.TestCase):
+    def test_probe_blob_reads_utf16_file(self):
+        # PowerShell 5.1 `>` writes UTF-16LE with a BOM; git show must not kill the runner.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, "init", "-q")
+            (repo / "inventory.json").write_bytes('{"gpu": 0}'.encode("utf-16"))
+            git(repo, "add", "inventory.json")
+            git(repo, "commit", "-q", "-m", "x")
+            store = Namespace(git=lambda *args, check=True: baton.run(["git", "-C", str(repo), *args], check=check))
+            text = baton._probe_blob(store, "HEAD", "inventory.json")
+        self.assertIsInstance(text, str)
+        self.assertTrue(text.startswith("�"))
 
 
 if __name__ == "__main__":

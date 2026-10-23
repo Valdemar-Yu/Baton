@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import baton_platform as platform_support
 import threading
 import time
 import urllib.error
@@ -100,6 +101,11 @@ def _project_index_lock(ledger: MemoryLedger, timeout: float = 5.0):
         fcntl = None
     if fcntl is None:
         try:
+            deadline = time.monotonic() + timeout
+            while not platform_support.lock_file(handle, blocking=False):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("mem0 project index lock timed out")
+                time.sleep(0.02)
             yield handle
         finally:
             handle.close()

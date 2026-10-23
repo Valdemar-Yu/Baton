@@ -139,6 +139,7 @@ baton rule <task> <curation-dossier> <verdict-file> --curation
 | `baton restore-frozen` / `baton amend` | 恢复冻结或提交用户核准的修正案 |
 | `baton preset list` / `baton preset use <名> [--task <任务>]` | 列出或切换 baton.json `presets` 里的执行者/monitor 预设；带 `--task` 时同步已启动任务的配置快照（该任务不能有运行中的一轮） |
 | `baton close <task>` | 验收通过后关闭任务 |
+| `baton close <task> --abandon "<原因>"` | 不再继续、也不会有 ACCEPT 终审的任务（如以 REPORT 结束）：账本记一条 abandon，任务 closed，清理卷宗代码 |
 | `baton memory install/verify/reindex` | 安装、校验、重建记忆索引 |
 
 ## 文件布局
@@ -146,6 +147,10 @@ baton rule <task> <curation-dossier> <verdict-file> --curation
 项目内：`.baton/tasks/<task>/brief.md` 是简报，`reports/` 是 executor 汇报，`reviews/` 是 verdict，`decisions/` 是请求，`runs/` 保存轮次事件，`log.md` 是修改日志，`supervision.md` 是监管记录；根目录 `baton.json` 保存项目模型和执行设置。
 
 项目外：`$BATON_HOME/projects/<project-id>/` 保存 state、影子仓库、回滚备份、卷宗、记忆台账和 qdrant；`$BATON_HOME/venv` 是 mem0/mcp 环境。Hermes profile 在 `~/.hermes/profiles/baton-exec-v2`，不写入项目 git。
+
+`BATON_HOME` 默认 `~/.baton`，可设到项目之外的其他磁盘。卷宗代码省略项目 git ignore 规则忽略的未跟踪文件；非 git 项目保持完整复制，省略统计写在 manifest 的 `code_omissions`。
+同一轮的检查卷宗只保留最新一份 `code/`；`close` 清理该任务所有卷宗的 `code/`，保留记录和账本。
+`baton gc --dry-run` 预览当前项目已关闭任务的清理数量和字节数，`baton gc` 执行清理。已清理卷宗不能重跑 monitor，回滚快照仍可使用。
 
 ## v2 配置示例
 

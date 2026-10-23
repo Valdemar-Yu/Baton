@@ -127,10 +127,13 @@ class FinishTests(unittest.TestCase):
             self.assertTrue(baton.migrate_baton_config(project))
         migrated = json.loads(path.read_text())
         self.assertEqual(migrated["conductor"]["model"], "sonnet")
-        self.assertEqual(migrated["executor"]["backend"], "hermes")
+        self.assertEqual(migrated["executor"]["backend"], "codex" if os.name == "nt" else "hermes")
         self.assertEqual(migrated["executor"]["model"], "gpt-5.6-luna")
         for key in ("service_tier", "disable_fast_mode", "sandbox"):
-            self.assertNotIn(key, migrated["executor"])
+            if os.name == "nt":
+                self.assertEqual(migrated["executor"].get(key), raw["executor"].get(key))
+            else:
+                self.assertNotIn(key, migrated["executor"])
         self.assertTrue((self.root / "baton.json.v1.bak").exists())
         self.assertIn("配置迁移差异", out.getvalue())
         second = io.StringIO()

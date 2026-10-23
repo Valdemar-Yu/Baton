@@ -1,3 +1,4 @@
+from platform_fixtures import executable_fixture
 import contextlib
 import io
 import json
@@ -23,7 +24,7 @@ class FreezeTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name) / "home"
         self.state = Path(self.tmp.name) / "state"
-        self.env = patch.dict(os.environ, {"HOME": str(self.home), "BATON_HOME": str(self.state)})
+        self.env = patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home), "BATON_HOME": str(self.state)})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.root = Path(self.tmp.name) / "project"
@@ -45,6 +46,21 @@ class FreezeTests(unittest.TestCase):
         manifest = baton.write_freeze_baseline(self.project, "t", self.scope, self.cfg)
         self.st = {"scope": self.scope, "freeze_manifest": manifest}
         return manifest
+
+    def test_bytecode_and_binary_files_under_tested_folder_do_not_break_freeze(self):
+        self.write("tests/acceptance/test_a.py", "def test_a():\n    assert True\n")
+        cache = self.root / "tests" / "acceptance" / "__pycache__"
+        cache.mkdir()
+        (cache / "test_a.cpython-312.pyc").write_bytes(b"\x9c\x00\xff\xfe bytecode")
+        (self.root / "tests" / "acceptance" / "fixture.bin").write_bytes(b"\x9c\xff\x00")
+        manifest = self.baseline()
+        paths = {entry["path"]: entry for entry in manifest["entries"]}
+        self.assertNotIn("tests/acceptance/__pycache__/test_a.cpython-312.pyc", paths)
+        self.assertTrue(paths["tests/acceptance/fixture.bin"]["value"].startswith("sha256:"))
+        (cache / "test_a.cpython-312.pyc").write_bytes(b"\x9c rebuilt by a test run")
+        self.assertEqual(baton.check_freeze(self.project, "t", self.st)["violations"], [])
+        (self.root / "tests" / "acceptance" / "fixture.bin").write_bytes(b"\x9c\xff\x01")
+        self.assertEqual(baton.check_freeze(self.project, "t", self.st)["violations"][0]["type"], "改动")
 
     def test_scope_valid_missing_invalid_unknown_and_escape(self):
         valid = "```baton-scope\n" + json.dumps({"allow": [], "deny": [], "acceptance": [], "frozen": []}) + "\n```"
@@ -237,7 +253,7 @@ class FreezeTests(unittest.TestCase):
                          adopt=["conftest.py"], user_approved=True)
         before = Path(self.project.state_path("t")).read_bytes()
         with patch.object(baton, "_open_tty", side_effect=OSError("无控制终端")), \
-                self.assertRaisesRegex(baton.ConfigError, "无法打开 /dev/tty"):
+                self.assertRaisesRegex(baton.ConfigError, r"无法打开 (/dev/tty|CONIN\$)"):
             baton.cmd_amend(self.project, args)
         self.assertEqual(Path(self.project.state_path("t")).read_bytes(), before)
         wrong_tty = Mock()
@@ -255,6 +271,25 @@ class FreezeTests(unittest.TestCase):
         correct_tty.close.assert_called_once()
         self.assertFalse(baton.check_freeze(self.project, "t")["violations"])
         self.assertEqual((Path(baton.freeze_dir(self.project, "t")) / "files/conftest.py").read_text(), "x=2\n")
+
+    def test_open_tty_uses_console_devices_on_windows(self):
+        opened = []
+
+        def fake_open(path, mode, encoding=None):
+            opened.append((path, mode))
+            return Mock()
+
+        with patch.object(baton.platform_support.os, "name", "nt"), \
+                patch("builtins.open", side_effect=fake_open):
+            tty = baton.platform_support.open_tty()
+            tty.write("q")
+            tty.readline()
+            tty.close()
+        self.assertEqual(opened, [("CONIN$", "r"), ("CONOUT$", "w")])
+        with patch.object(baton.platform_support.os, "name", "posix"), \
+                patch("builtins.open", side_effect=fake_open):
+            baton.platform_support.open_tty()
+        self.assertEqual(opened[-1], ("/dev/tty", "r+"))
 
     def test_amend_validates_config_and_classifies_relaxations(self):
         manifest = self.baseline()
@@ -362,7 +397,7 @@ class FreezeTests(unittest.TestCase):
                         "j = next(x.split('=', 1)[1] for x in sys.argv if x.startswith('--junitxml='))\n"
                         "pathlib.Path(j).write_text('<testsuite><testcase classname=\"pkg.test_a\" name=\"test_ok\"/></testsuite>')\n",
                         encoding="utf-8")
-        fake.chmod(0o755)
+        fake = executable_fixture(fake)
         cfg = json.loads(json.dumps(self.cfg))
         cfg["supervision"]["test_command"] = "pytest"
         st = {"scope": dict(self.scope, acceptance=["tests/acceptance"])}
@@ -381,15 +416,18 @@ class FreezeTests(unittest.TestCase):
     def test_verification_timeout_kills_process_group(self):
         cfg = json.loads(json.dumps(self.cfg))
         cfg["supervision"]["test_command"] = "sh -c 'sleep 30 & echo $! > child.pid; wait'"
-        cfg["supervision"]["verify_timeout_minutes"] = 0.001
+        if os.name == "nt":
+            script = self.root / "sleep-tree.py"
+            script.write_text("import subprocess,sys,time,pathlib; p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); pathlib.Path('child.pid').write_text(str(p.pid)); time.sleep(30)", encoding="utf-8")
+            cfg["supervision"]["test_command"] = subprocess.list2cmdline([sys.executable, str(script)])
+        cfg["supervision"]["verify_timeout_minutes"] = 0.01
         result = baton.run_verification(self.project, "t-timeout",
                                         {"scope": self.scope}, cfg, leg_n=1)
         self.assertTrue(result["timed_out"])
         child_file = self.root / "child.pid"
         self.assertTrue(child_file.exists())
         child_pid = int(child_file.read_text().strip())
-        with self.assertRaises(OSError):
-            os.kill(child_pid, 0)
+        self.assertFalse(baton.pid_alive(child_pid))
 
     def test_non_pytest_verification_writes_project_and_external_records(self):
         (self.root / ".baton").mkdir(parents=True, exist_ok=True)
@@ -421,7 +459,7 @@ class FreezeTests(unittest.TestCase):
                         "j = next(x.split('=', 1)[1] for x in sys.argv if x.startswith('--junitxml='))\n"
                         "pathlib.Path(j).write_text('<testsuite><testcase file=\"tests/acceptance/test_a.py\" name=\"test_a\"/></testsuite>')\n"
                         "print('1 passed, 2 deselected')\n", encoding="utf-8")
-        fake.chmod(0o755)
+        fake = executable_fixture(fake)
         cfg = json.loads(json.dumps(self.cfg))
         cfg["supervision"]["test_command"] = "pytest tests/acceptance -x"
         st = {"scope": self.scope}
@@ -457,7 +495,7 @@ class FreezeTests(unittest.TestCase):
         def command(project, kind, thread, last, cfg=None):
             return [sys.executable, str(fake), "-o", last]
         out = io.StringIO()
-        with patch.dict(os.environ, {"HOME": str(self.home), "BATON_HOME": str(self.state),
+        with patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home), "BATON_HOME": str(self.state),
                                       "BATON_DESKTOP_NOTIFY": "0"}), \
                 patch.object(baton, "safe_quota", return_value=None), \
                 patch.object(baton, "codex_command", side_effect=command):
@@ -468,7 +506,7 @@ class FreezeTests(unittest.TestCase):
                 state = self.project.read_state("t") or {}
                 leg = baton.current_leg(state) or {}
                 runner_pid = leg.get("runner_pid") or runner_pid
-                if runner_pid:
+                if runner_pid and os.name != "nt":
                     try:
                         os.waitpid(runner_pid, os.WNOHANG)
                     except ChildProcessError:
@@ -478,7 +516,7 @@ class FreezeTests(unittest.TestCase):
                 time.sleep(0.1)
             else:
                 if runner_pid and baton.pid_alive(runner_pid):
-                    os.kill(runner_pid, baton.signal.SIGKILL)
+                    baton.platform_support.stop_tree(runner_pid, (0, 3)) if os.name == "nt" else os.kill(runner_pid, baton.signal.SIGKILL)
                 self.fail("fake codex runner did not exit within 30 seconds")
             with contextlib.redirect_stdout(out):
                 baton.cmd_wait(self.project, Namespace(task="t", tick=0))

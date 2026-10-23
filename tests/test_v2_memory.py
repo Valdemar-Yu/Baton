@@ -1,3 +1,4 @@
+from platform_fixtures import executable_fixture
 import json
 import os
 import tempfile
@@ -121,19 +122,31 @@ class MemoryTests(unittest.TestCase):
         (self.root / ".baton" / "tasks" / "task").mkdir(parents=True, exist_ok=True)
         (self.root / ".baton" / "tasks" / "task" / "brief.md").write_text("目标\n", encoding="utf-8")
         self.ledger.append([self.entry()])
-        fake_python = self.home / "venv" / "bin" / "python"
+        fake_python = Path(baton.platform_support.venv_python(str(self.home)))
         fake_python.parent.mkdir(parents=True, exist_ok=True)
-        fake_python.write_text("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"context\":\"FAKE_VENV_CONTEXT\",\"core\":\"\",\"pushed\":[\"M001\"],\"withdrawals\":[]}'\n", encoding="utf-8")
-        fake_python.chmod(0o755)
+        fake_python.write_text("#!" + sys.executable + "\nimport sys,json; sys.stdin.read(); print(json.dumps({'ok':True,'context':'FAKE_VENV_CONTEXT','core':'','pushed':['M001'],'withdrawals':[]}))", encoding="utf-8")
+        fake_python = executable_fixture(fake_python)
         project = baton.Project(str(self.root))
         with patch.dict(os.environ, {"BATON_HOME": str(self.home)}):
-            text, meta = baton.memory_prompt_for_leg(project, "task", "指令", st={}, cfg=project.config)
+            text, meta = baton.memory_prompt_for_leg(project, "task", "指令", st={}, cfg=baton.deep_merge(project.config, {"memory": {"backend": "mem0"}}))
         self.assertIn("FAKE_VENV_CONTEXT", text)
         self.assertEqual(meta["pushed"], ["M001"])
 
+    def test_keyword_fallback_accepts_shortstat_diff_from_prior_leg(self):
+        # A finished leg stores diff as the [files, insertions, deletions] shortstat, not path records.
+        import baton
+        (self.root / ".baton" / "tasks" / "task").mkdir(parents=True, exist_ok=True)
+        (self.root / ".baton" / "tasks" / "task" / "brief.md").write_text("目标\n", encoding="utf-8")
+        self.ledger.append([self.entry()])
+        project = baton.Project(str(self.root))
+        st = {"legs": [{"n": 1, "diff": [4, 195, 96]}]}
+        cfg = baton.deep_merge(project.config, {"memory": {"backend": "local"}})
+        text, meta = baton.memory_prompt_for_leg(project, "task", "指令", st=st, cfg=cfg)
+        self.assertIn("指令", text)
+
     def test_profile_config_passes_baton_home_to_mcp(self):
         import baton
-        fake = self.home / "venv" / "bin" / "python"
+        fake = Path(baton.platform_support.venv_python(str(self.home)))
         fake.parent.mkdir(parents=True, exist_ok=True)
         fake.write_text("", encoding="utf-8")
         cfg = {"executor": {"provider": "openai-codex"},
@@ -197,7 +210,7 @@ class MemoryTests(unittest.TestCase):
         old_cwd = os.getcwd()
         os.chdir(self.root)
         try:
-            with patch.dict(os.environ, {"HOME": str(self.home), "BATON_HOME": "${BATON_HOME}", "BATON_TASK": "task",
+            with patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home), "BATON_HOME": "${BATON_HOME}", "BATON_TASK": "task",
                                          "BATON_LEG": "1", "BATON_LEG_STARTED": "1"}):
                 with patch("baton_memory.server._find_project", return_value=str(self.root)):
                     result = _memory_search_impl(["pytest"])

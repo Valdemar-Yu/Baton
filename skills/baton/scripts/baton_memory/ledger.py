@@ -10,6 +10,7 @@ import datetime as _datetime
 import hashlib
 import json
 import os
+import baton_platform as platform_support
 import re
 import stat
 import tempfile
@@ -83,7 +84,7 @@ class LedgerCorrupt(LedgerError):
 @contextmanager
 def _file_lock(path: str, exclusive: bool) -> Iterator[Any]:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a+b") as handle:
+    with (platform_support.exclusive_lock(path) if os.name == "nt" else open(path, "a+b")) as handle:
         if fcntl is not None:
             mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
             fcntl.flock(handle.fileno(), mode)
@@ -213,7 +214,7 @@ class MemoryLedger:
                 stream.write(value + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(tmp, self.head_path)
+            platform_support.atomic_replace(tmp, self.head_path)
         finally:
             try:
                 os.unlink(tmp)
@@ -332,7 +333,7 @@ class MemoryLedger:
         os.makedirs(os.path.dirname(self.export_path), exist_ok=True)
         tmp = self.export_path + ".tmp.%s" % os.getpid()
         Path(tmp).write_text("\n".join(lines), encoding="utf-8")
-        os.replace(tmp, self.export_path)
+        platform_support.replace_readonly(tmp, self.export_path)
         try:
             os.chmod(self.export_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
         except OSError:

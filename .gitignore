@@ -5,3 +5,6 @@ __pycache__/
 .claude/settings.local.json.bak
 .baton/runs/
 .council/
+
+# Local Windows validation evidence (summary and smoke are in the port report).
+test-results/

@@ -94,6 +94,28 @@ baton wait <task> &
 
 executor 每次小修改追加 `.baton/log.md`；大修改写 `.baton/reports/R*.html` 后暂停。monitor 生成独立监督简报，conductor 逐条写 `baton-verdict`，运行 `baton rule`，通过门槛后才 `baton resume --verdict`。任务结束要经过终审和 `baton close`。容量错误会自动立即重试 3 次，再延迟 15 分钟重试 1 次；用尽后产生 FAILED，由 conductor 决定换模型、拆分或询问用户。
 
+## 状态与卷宗存储
+
+项目外状态默认在 `~/.baton/projects/<project-id>/`，包括影子仓库、任务状态、卷宗和账本。
+设置环境变量 `BATON_HOME` 可以换到容量更大的磁盘，例如 macOS/Linux 的
+`export BATON_HOME=/Volumes/Data/baton`，或 PowerShell 的 `$env:BATON_HOME = 'D:/baton'`。
+该目录须在项目之外；更换位置时，先停止运行中的任务，再把原状态目录的内容移到新位置，后续命令保持相同设置。
+
+卷宗的 `code/` 从影子快照复制，省略项目自身 git ignore 规则忽略的未跟踪文件；项目跟踪的文件仍保留。
+非 git 项目保持完整复制。`manifest.json` 中的 `code_omissions` 记录省略文件数、字节数和原因。
+同一任务同一轮的轮中检查只保留最新检查卷宗的 `code/`，每次新检查会删除旧检查的代码副本。
+`baton close` 删除该任务所有卷宗的代码副本；其余记录、原始文件清单和账本保留，manifest 另记 `code_pruned`。
+已清理的卷宗可核验保留的记录，但不能重跑 monitor。影子仓库的回滚快照保留。
+
+清理当前项目中此前已关闭任务的卷宗代码：
+
+```bash
+baton gc --dry-run
+baton gc
+```
+
+命令打印卷宗数量、文件数和字节数；未关闭任务的卷宗保留。
+
 ## 从 v1 迁移
 
 旧项目先备份并迁移项目根的配置：
@@ -129,3 +151,7 @@ baton init --migrate
 1. ParadoxZW. *council.skill*. GitHub, 2026. <https://github.com/ParadoxZW/council.skill>
 2. Prateek Chhikara, Dev Khant, Saket Aryan, Taranjeet Singh, Deshraj Yadav. *Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory*. arXiv:2504.19413, 2025. <https://arxiv.org/abs/2504.19413>
 3. Soumil Rathi, Deshraj Yadav, Taranjeet Singh. *DolphinBench: Mapping the Pareto Frontier of Agent Memory*. arXiv:2609.24971, 2026. <https://arxiv.org/abs/2609.24971>
+
+## Windows
+
+Native Windows 11 support uses Codex as executor and monitor, with local memory by default. Hermes is unsupported on Windows. See [WINDOWS.md](WINDOWS.md) for installation, process behavior, and v1/v2 coexistence.

@@ -1,7 +1,10 @@
+from platform_fixtures import wait_windows_pid
+from platform_fixtures import executable_fixture
 import contextlib
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -32,7 +35,7 @@ class CapacityRetryTests(unittest.TestCase):
         self.calls_file = self.root / "calls.jsonl"
         self.env = os.environ.copy()
         self.env.update({
-            "HOME": str(self.home),
+            "HOME": str(self.home), "USERPROFILE": str(self.home),
             "BATON_HOME": str(self.state),
             "PATH": str(self.bindir) + os.pathsep + self.env.get("PATH", ""),
             "BATON_DESKTOP_NOTIFY": "0",
@@ -86,7 +89,7 @@ json.dump({"status": "done", "summary": "fake", "artifact": "", "change_size": "
 '''
         path = self.bindir / "codex"
         path.write_text(script, encoding="utf-8")
-        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        path = executable_fixture(path)
         self.env["BATON_CAPACITY_BEHAVIORS"] = json.dumps(behaviors)
 
     def cli(self, *args, timeout=60):
@@ -120,25 +123,31 @@ json.dump({"status": "done", "summary": "fake", "artifact": "", "change_size": "
                 target = self.project_root / path
                 target.write_text("baseline\n", encoding="utf-8")
                 self.env["BATON_CAPACITY_ACCEPTANCE"] = str(target)
-        self.assertEqual(self.cli("start", "capacity").returncode, 0)
+        started = self.cli("start", "capacity")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.runner_pid = int(re.search(r"runner_pid=(\d+)", started.stdout)[1])
+        if os.name == "nt":
+            self.addCleanup(wait_windows_pid, self.runner_pid)
         state_dir = next((self.state / "projects").iterdir())
         state_path = state_dir / "tasks" / "capacity" / "state.json"
         return state_path
 
-    def wait_until_done(self, state_path, timeout=30):
+    def wait_until_done(self, state_path, timeout=60):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            state = json.loads(state_path.read_text())
+            state = json.loads(baton.platform_support.read_text(state_path))
             if state.get("status") != "running":
+                if os.name == "nt":
+                    wait_windows_pid(self.runner_pid)
                 return state
             time.sleep(0.05)
-        self.fail("fake codex runner did not finish")
+        self.fail("fake codex runner did not finish: " + json.dumps(state, ensure_ascii=False))
 
     def test_capacity_failure_two_times_then_success(self):
         path = self.start(["capacity", "capacity", "success"])
         state = self.wait_until_done(path)
         leg = state["legs"][-1]
-        self.assertEqual(leg["status"], "done")
+        self.assertEqual(leg["status"], "done", leg)
         self.assertEqual(len(leg["capacity_retries"]), 2)
         self.assertNotIn("failure_kind", leg)
         self.assertEqual(int(self.count_file.read_text()), 3)
@@ -148,7 +157,7 @@ json.dump({"status": "done", "summary": "fake", "artifact": "", "change_size": "
                           {"immediate": 3, "delayed": 1, "delayed_minutes": 0.001})
         state = self.wait_until_done(path)
         leg = state["legs"][-1]
-        self.assertEqual(leg["status"], "done")
+        self.assertEqual(leg["status"], "done", leg)
         self.assertEqual([x["phase"] for x in leg["capacity_retries"]],
                          ["immediate", "immediate", "immediate", "delayed"])
         self.assertEqual(int(self.count_file.read_text()), 5)
@@ -172,7 +181,7 @@ json.dump({"status": "done", "summary": "fake", "artifact": "", "change_size": "
                           {"immediate": 1, "delayed": 0, "delayed_minutes": 0.001})
         state = self.wait_until_done(path)
         leg = state["legs"][-1]
-        self.assertEqual(leg["status"], "done")
+        self.assertEqual(leg["status"], "done", leg)
         self.assertEqual(len(leg["capacity_retries"]), 2)
 
     def test_non_capacity_failure_is_not_retried(self):
@@ -232,7 +241,7 @@ json.dump({"status": "done", "summary": "fake", "artifact": "", "change_size": "
         path = self.start(["capacity"], {"immediate": 0, "delayed": 1, "delayed_minutes": 0.05})
         deadline = time.time() + 10
         while time.time() < deadline:
-            state = json.loads(path.read_text())
+            state = json.loads(baton.platform_support.read_text(path))
             if state["legs"][-1].get("capacity_wait"):
                 break
             time.sleep(0.05)

@@ -11,9 +11,14 @@ The Codex line never blocks: it renders cached data and refreshes in the backgro
 import json
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import time
+
+import baton_platform as platform_support
+
+platform_support.utf8_stdio()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -33,7 +38,7 @@ def is_baton_command(cmd):
 
 def _statusline_command(path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             sl = json.load(f).get("statusLine")
     except Exception:
         return None
@@ -54,7 +59,7 @@ def resolve_base(project_dir):
     candidates = []
     if project_dir:
         try:
-            with open(os.path.join(project_dir, ".baton", "statusline-saved.json")) as f:
+            with open(os.path.join(project_dir, ".baton", "statusline-saved.json"), encoding="utf-8") as f:
                 prev = json.load(f).get("previous")
             if isinstance(prev, dict):
                 candidates.append(prev.get("command"))
@@ -86,7 +91,7 @@ def project_baton_json(session):
 def executor_config(session):
     cfg = codex_quota.skill_config().get("executor", {})
     try:
-        with open(os.path.join(project_dir_of(session), ".baton", "config.json")) as f:
+        with open(os.path.join(project_dir_of(session), ".baton", "config.json"), encoding="utf-8") as f:
             cfg = {**cfg, **(json.load(f).get("executor") or {})}
     except Exception:
         pass
@@ -250,13 +255,16 @@ def main():
     cmd = resolve_base(project_dir_of(session))
     if cmd:
         try:
-            p = subprocess.run(cmd, shell=True, input=raw, capture_output=True, timeout=8,
+            # Match Claude Code's Git Bash statusLine command semantics on Windows.
+            command = [shutil.which("bash.exe") or "bash.exe", "-c", cmd] if os.name == "nt" else cmd
+            p = subprocess.run(command, shell=os.name != "nt", input=raw, capture_output=True, timeout=8,
                                env=dict(os.environ, **{GUARD: "1"}))
             out = p.stdout.decode("utf-8", "replace").rstrip("\n")
             if out:
                 lines.append(out)
-        except Exception:
-            pass
+        except Exception as e:
+            if os.name == "nt":
+                print(f"[fail] Base statusline: {e}; rendering quota only", file=sys.stderr)
     try:
         lines.append(codex_line(session))
     except Exception:

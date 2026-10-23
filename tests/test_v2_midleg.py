@@ -1,3 +1,5 @@
+from platform_fixtures import wait_windows_pid
+from platform_fixtures import executable_fixture
 import argparse
 import contextlib
 import io
@@ -18,6 +20,8 @@ import baton  # noqa: E402
 
 
 def wait_for_pid(pid, timeout=20):
+    if os.name == "nt":
+        return wait_windows_pid(pid, timeout)
     if not pid:
         return
     deadline = time.time() + timeout
@@ -51,7 +55,7 @@ class MidlegTests(unittest.TestCase):
         self.root.mkdir()
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         (self.root / "a.py").write_text("value = 1\n", encoding="utf-8")
-        self.env = patch.dict(os.environ, {"HOME": str(base / "home"), "BATON_HOME": str(base / "state"),
+        self.env = patch.dict(os.environ, {"HOME": str(base / "home"), "USERPROFILE": str(base / "home"), "BATON_HOME": str(base / "state"),
                                            "PYTHONDONTWRITEBYTECODE": "1", "BATON_DESKTOP_NOTIFY": "0"}, clear=False)
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -465,7 +469,7 @@ class MidlegTests(unittest.TestCase):
         fake_dir.mkdir()
         fake = fake_dir / "codex"
         fake.write_text("#!/usr/bin/env python3\nimport json,sys\nout=sys.argv[sys.argv.index('-o')+1]\njson.dump({'conclusion':'on_track','summary':'ok','findings':[]},open(out,'w'))\n", encoding="utf-8")
-        fake.chmod(fake.stat().st_mode | 0o111)
+        fake = executable_fixture(fake)
         with patch.dict(os.environ, {"PATH": str(fake_dir) + os.pathsep + os.environ.get("PATH", "")}, clear=False):
             started = baton.maybe_start_monitor_check(self.project, "t", self.project.load_state("t"),
                                                       self.project.load_state("t")["legs"][0], force=True)
@@ -567,7 +571,7 @@ class MidlegTests(unittest.TestCase):
             stop_reason="breaking") or s.update(supervision_action="breaking"))
         baton.cmd_run(self.project, argparse.Namespace(task="t", n="1"))
         state = self.project.load_state("t")
-        self.assertEqual(state["legs"][0]["exit_code"], -15)
+        self.assertEqual(state["legs"][0]["exit_code"], 15 if os.name == "nt" else -15)
         self.assertEqual(state["legs"][0]["status"], "breaking")
         verify_path = Path(self.project.leg_path("t", 1, "verify.json"))
         self.assertTrue(verify_path.exists())
@@ -711,9 +715,9 @@ else:
     time.sleep(2)
     json.dump({'status':'done','summary':'done','artifact':'','change_size':'minor'}, open(out, 'w'))
 """, encoding="utf-8")
-        fake.chmod(fake.stat().st_mode | 0o111)
+        fake = executable_fixture(fake)
         env = os.environ.copy()
-        env.update({"HOME": str(base / "home"), "BATON_HOME": str(base / "state"),
+        env.update({"HOME": str(base / "home"), "USERPROFILE": str(base / "home"), "BATON_HOME": str(base / "state"),
                     "PATH": str(bindir) + os.pathsep + env.get("PATH", ""),
                     "BATON_DESKTOP_NOTIFY": "0", "PYTHONDONTWRITEBYTECODE": "1"})
         self.assertEqual(self.cli(root, env, "init", "--no-statusline").returncode, 0)

@@ -1,3 +1,5 @@
+from platform_fixtures import wait_windows_pid
+from platform_fixtures import executable_fixture
 import contextlib
 import io
 import json
@@ -9,7 +11,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "baton" / "scripts"))
@@ -17,6 +19,8 @@ import baton  # noqa: E402
 
 
 def wait_for_pid(pid, timeout=30):
+    if os.name == "nt":
+        return wait_windows_pid(pid, timeout)
     if not pid:
         return
     deadline = baton.now() + timeout
@@ -50,7 +54,7 @@ class RulingTests(unittest.TestCase):
         self.root = base / "project"
         self.root.mkdir()
         (self.root / "a.py").write_text("x = 1\n", encoding="utf-8")
-        self.env = patch.dict(os.environ, {"HOME": str(base / "home"), "BATON_HOME": str(base / "state"),
+        self.env = patch.dict(os.environ, {"HOME": str(base / "home"), "USERPROFILE": str(base / "home"), "BATON_HOME": str(base / "state"),
                                            "BATON_DESKTOP_NOTIFY": "0", "PYTHONDONTWRITEBYTECODE": "1"}, clear=False)
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -336,6 +340,7 @@ class RulingTests(unittest.TestCase):
     def test_close_success_lists_rejected_findings_and_closed_blocks_resume(self):
         finding = {"id": "F1", "category": "out_of_scope", "severity": "blocking", "description": "d",
                    "evidence": [], "rule_source": "r"}
+        report, _, _, _ = self.make_dossier(kind="report")
         dossier, _, _, _ = self.make_dossier(kind="final", findings=[finding])
         self.rule(dossier, "ACCEPT", {"F1": {"decision": "reject", "reason": "保留记录"}})
         self.project.update_state("t", lambda s: baton.current_leg(s).update(
@@ -345,10 +350,52 @@ class RulingTests(unittest.TestCase):
             baton.cmd_close(self.project, Namespace(task="t"))
         self.assertIn("已 closed", output.getvalue())
         self.assertIn("F1 · out_of_scope · blocking", output.getvalue())
+        root = Path(baton.dossier_path(self.project, dossier))
+        self.assertFalse((root / "code").exists())
+        self.assertFalse((Path(baton.dossier_path(self.project, report)) / "code").exists())
+        self.assertTrue((root / "charter.md").exists())
+        self.assertTrue(baton.verify_dossier(self.project, dossier)[0])
+        self.assertTrue(baton.verify_ledger(self.project))
+        brief, _ = baton._dossier_brief(self.project, "t", dossier)
+        self.assertIsNotNone(brief)
         with self.assertRaises(SystemExit):
             baton.cmd_resume(self.project, Namespace(task="t", message="x", message_file=None, kind="回复",
                                                      verdict=None, decision=None, user_approved_continue=False,
                                                      _message_archived=False))
+
+    def test_monitor_rerun_rebuilds_dossier_missing_manifest(self):
+        dossier = self.make_dossier(kind="report")[0]
+        root = Path(baton.dossier_path(self.project, dossier))
+        baton._unseal_dossier(str(root))
+        (root / "manifest.json").unlink()
+        with patch.object(baton.platform_support, "detached_popen", return_value=Mock(pid=1)),                 contextlib.redirect_stdout(io.StringIO()) as output:
+            baton.cmd_monitor(self.project, Namespace(task="t", dossier=dossier, rerun=True, curate=False))
+        self.assertIn("已重建卷宗", output.getvalue())
+        self.assertTrue(baton.verify_dossier(self.project, dossier)[0])
+        self.assertEqual(baton.current_leg(self.project.load_state("t"))["dossier"]["id"], dossier)
+
+    def test_close_abandon_without_final_dossier_records_and_prunes(self):
+        report, _, _, _ = self.make_dossier(kind="report")
+        with self.assertRaises(SystemExit):
+            baton.cmd_close(self.project, Namespace(task="t"))
+        with self.assertRaises(SystemExit):
+            baton.cmd_close(self.project, Namespace(task="t", abandon="  "))
+        self.assertNotEqual(self.project.load_state("t").get("status"), "closed")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            baton.cmd_close(self.project, Namespace(task="t", abandon="以 REPORT 结束"))
+        self.assertIn("已按放弃 closed", output.getvalue())
+        st = self.project.load_state("t")
+        self.assertEqual(st["status"], "closed")
+        self.assertTrue(st["closed"]["abandoned"])
+        rec = [r for r in baton.ledger_records(self.project) if r.get("type") == "abandon"][-1]
+        self.assertEqual((rec["task"], rec["reason"], rec["seq"]), ("t", "以 REPORT 结束", st["closed"]["ledger_seq"]))
+        self.assertTrue(baton.verify_ledger(self.project))
+        root = Path(baton.dossier_path(self.project, report))
+        self.assertFalse((root / "code").exists())
+        self.assertTrue(baton.verify_dossier(self.project, report)[0])
+        with self.assertRaises(SystemExit):
+            baton.cmd_close(self.project, Namespace(task="t", abandon="again"))
 
     def test_real_cli_end_to_end_report_rule_resume_final_close(self):
         # This uses only a temporary project, HOME/BATON_HOME and a fake codex executable.
@@ -356,7 +403,7 @@ class RulingTests(unittest.TestCase):
         cli_root.mkdir()
         subprocess.run(["git", "init", "-q", str(cli_root)], check=True)
         env = os.environ.copy()
-        env.update({"HOME": str(Path(self.tmp.name) / "cli-home"),
+        env.update({"HOME": str(Path(self.tmp.name) / "cli-home"), "USERPROFILE": str(Path(self.tmp.name) / "cli-home"),
                     "BATON_HOME": str(Path(self.tmp.name) / "cli-state"),
                     "BATON_DESKTOP_NOTIFY": "0"})
         bindir = Path(self.tmp.name) / "cli-bin"
@@ -384,7 +431,7 @@ else:
         value = {'status':'done','summary':'done','artifact':'','change_size':'minor'}
     pathlib.Path(out).write_text(json.dumps(value, ensure_ascii=False))
 """, encoding="utf-8")
-        fake.chmod(0o755)
+        fake = executable_fixture(fake)
         env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
         def run(*args):
             return subprocess.run([sys.executable, str(ROOT / "skills/baton/scripts/baton.py"), "--root", str(cli_root), *args],

@@ -21,7 +21,7 @@ class LeanModeTests(unittest.TestCase):
         self.root = Path(self.tmp.name) / "project"
         (self.root / ".baton").mkdir(parents=True)
         self.env = patch.dict(os.environ, {
-            "HOME": str(Path(self.tmp.name) / "home"),
+            "HOME": str(Path(self.tmp.name) / "home"), "USERPROFILE": str(Path(self.tmp.name) / "home"),
             "BATON_HOME": str(Path(self.tmp.name) / "state"),
         })
         self.env.start()

@@ -24,7 +24,7 @@ class V2StateTests(unittest.TestCase):
         self.home = env_root / "home"
         self.baton_home = env_root / "baton-home"
         self.env = patch.dict(os.environ, {
-            "HOME": str(self.home),
+            "HOME": str(self.home), "USERPROFILE": str(self.home),
             "BATON_HOME": str(self.baton_home),
         })
         self.env.start()

@@ -1,3 +1,4 @@
+from platform_fixtures import directory_link
 import contextlib
 import hashlib
 import io
@@ -22,7 +23,7 @@ class BatonJsonTests(unittest.TestCase):
         self.addCleanup(env_tmp.cleanup)
         self.env_root = Path(env_tmp.name)
         env = patch.dict(os.environ, {
-            "HOME": str(self.env_root / "home"),
+            "HOME": str(self.env_root / "home"), "USERPROFILE": str(self.env_root / "home"),
             "BATON_HOME": str(self.env_root / "state"),
         })
         env.start()
@@ -255,7 +256,8 @@ class BatonJsonTests(unittest.TestCase):
         for expected in ("conductor.model：sonnet", "monitor.model：gpt-5.6-luna", "monitor.reasoning_effort：max",
                          "monitor.final_reasoning_effort：max", "monitor.timeout_minutes：40", "executor.backend：codex",
                          os.path.realpath(str(root)), project.project_id, project.state_dir,
-                         "迁移提示", "Hermes", "第 4 阶段", "baton init --migrate"):
+                         "迁移提示", "Windows v2" if os.name == "nt" else "Hermes",
+                         "也使用 codex" if os.name == "nt" else "第 4 阶段", "baton init --migrate"):
             self.assertIn(expected, summary)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -281,7 +283,7 @@ class BatonJsonTests(unittest.TestCase):
         self.assertEqual(project.project_id, expected)
         self.assertEqual(project.state_dir, str(self.env_root / "state" / "projects" / expected))
         alias = self.env_root / "alias"
-        alias.symlink_to(root, target_is_directory=True)
+        directory_link(alias, root)
         self.assertEqual(baton.Project(str(alias)).project_id, expected)
         with patch.dict(os.environ):
             os.environ.pop("BATON_HOME", None)

@@ -22,7 +22,7 @@ class GoliveTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="baton-golive-")
         self.base = Path(self.tmp.name)
         self.env = patch.dict(os.environ, {
-            "HOME": str(self.base / "home"),
+            "HOME": str(self.base / "home"), "USERPROFILE": str(self.base / "home"),
             "BATON_HOME": str(self.base / "state"),
             "BATON_DESKTOP_NOTIFY": "0",
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -83,10 +83,11 @@ class GoliveTests(unittest.TestCase):
         self.assertIn("不能派子 agent 代替 monitor", out.getvalue())
 
 
+@unittest.skipIf(os.name == "nt", "POSIX installer only; Windows installer is statically validated, never run")
 class InstallScriptTests(unittest.TestCase):
     def run_install(self, home, path=None):
         env = os.environ.copy()
-        env.update({"HOME": str(home), "CLAUDE_SKILLS_DIR": str(home / ".claude/skills"),
+        env.update({"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_SKILLS_DIR": str(home / ".claude/skills"),
                     "BATON_BIN_DIR": str(home / ".local/bin"),
                     "PATH": path or env.get("PATH", "")})
         return subprocess.run(["bash", str(ROOT / "install.sh")], cwd=str(ROOT), env=env,

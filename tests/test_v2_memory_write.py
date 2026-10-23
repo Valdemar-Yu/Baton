@@ -62,6 +62,13 @@ class MemoryWriteTests(unittest.TestCase):
         self.assertEqual(values[1]["kind"], "pitfall")
         self.assertEqual(parse_memory_candidates("<h2>记忆候选</h2><pre data-memory-candidates=\"true\">[]</pre>"), [])
 
+    def test_html_escaped_pre_block_candidates_are_parsed(self):
+        report = ('<h2>记忆候选</h2><pre data-memory-candidates="true">[{&quot;kind&quot;:&quot;pitfall&quot;,'
+                  '&quot;text&quot;:&quot;a &amp;&amp; b&quot;,&quot;source&quot;:&quot;executor&quot;,'
+                  '&quot;anchors&quot;:[&quot;src/a.py&quot;]}]</pre>')
+        values = parse_memory_candidates(report)
+        self.assertEqual(values[0]["text"], "a && b")
+
     def test_monitor_memory_advice_is_strict_object_array(self):
         valid = {"summary": "ok", "recommendation": "APPROVE", "findings": [],
                  "memory_advice": [{"id": "C1", "action": "approve", "kind": "command",

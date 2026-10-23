@@ -10,6 +10,8 @@ import glob
 import hashlib
 import json
 import os
+import sys
+import baton_platform as platform_support
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +28,8 @@ PACKAGES = ["mem0ai>=2.0.16,<3", "ollama", "mcp>=1.26,<2"]
 def find_python(explicit: Optional[str] = None) -> str:
     if explicit:
         return os.path.abspath(os.path.expanduser(explicit))
+    if os.name == "nt":
+        return sys.executable
     candidates = sorted(glob.glob(os.path.expanduser("~/.local/share/uv/python/cpython-3.11*/bin/python3.11")))
     for value in candidates:
         if os.path.isfile(value) and os.access(value, os.X_OK):
@@ -101,11 +105,11 @@ def install_memory(baton_home: Optional[str] = None, python: Optional[str] = Non
     py311 = find_python(python)
     scripts_dir = os.path.abspath(scripts_dir or os.path.dirname(os.path.dirname(__file__)))
     os.makedirs(home, exist_ok=True)
-    if not os.path.exists(os.path.join(venv, "bin", "python")):
+    if not os.path.exists(platform_support.venv_python(home)):
         result = _run([py311, "-m", "venv", venv], runner=runner)
         if getattr(result, "returncode", 1) != 0:
             raise RuntimeError("创建记忆 venv 失败")
-    vpy = os.path.join(venv, "bin", "python")
+    vpy = platform_support.venv_python(home)
     pip_result = _run([vpy, "-m", "pip", "install", *PACKAGES], runner=runner, capture_output=True, text=True)
     if getattr(pip_result, "returncode", 1) != 0:
         raise RuntimeError("安装 mem0ai/ollama/mcp 失败")
