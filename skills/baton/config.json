@@ -1,34 +1,36 @@
 {
   "_comment": "Baton defaults. Configuration deep-merges in this order: this skill config.json, <project>/.baton/config.json, then <project>/baton.json. Project quota.* is ignored; quota is per account and read from this file only. BATON_QUOTA_WARN_PERCENT and BATON_DESKTOP_NOTIFY=0 override it per shell.",
   "conductor": {
-    "model": "opus",
+    "model": "gpt-6-astra",
     "council_for_major_decisions": true,
-    "reasoning_effort": null
+    "reasoning_effort": "ultra",
+    "service_tier": "priority",
+    "disable_fast_mode": false
   },
   "monitor": {
-    "model": "gpt-5.6-sol",
-    "reasoning_effort": null,
-    "final_reasoning_effort": null,
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "final_reasoning_effort": "max",
     "timeout_minutes": 40
   },
   "executor": {
-    "backend": "hermes",
+    "backend": "codex",
     "hermes_profile": "baton-exec-v2",
     "provider": "openai-codex",
     "toolsets": ["file", "terminal", "todo", "baton-memory"],
     "sandbox_exec": true,
-    "model": "gpt-5.6-luna",
-    "reasoning_effort": "xhigh",
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "ultra",
     "escalation": {
       "enabled": true,
       "model": "gpt-6.1-sol",
-      "reasoning_effort": "xhigh",
+      "reasoning_effort": "ultra",
       "after_revise": 2,
       "after_blocked_or_failed_legs": 2,
       "max_per_task": 3
     },
-    "service_tier": "default",
-    "disable_fast_mode": true,
+    "service_tier": "priority",
+    "disable_fast_mode": false,
     "sandbox": "workspace-write",
     "network_access": false,
     "capacity_retry": {
@@ -61,6 +63,9 @@
     },
     "test_command": "",
     "verify_timeout_minutes": 30
+  },
+  "approvals": {
+    "delegate_to_conductor": false
   },
   "freeze": {
     "paths": [],

@@ -34,9 +34,9 @@ class GoliveTests(unittest.TestCase):
     def test_skill_defaults_are_v2_and_init_writes_v2_keys(self):
         cfg = json.loads((ROOT / "skills/baton/config.json").read_text(encoding="utf-8"))
         executor = cfg["executor"]
-        self.assertEqual(executor["backend"], "hermes")
-        self.assertEqual(executor["model"], "gpt-5.6-luna")
-        self.assertEqual(executor["reasoning_effort"], "xhigh")
+        self.assertEqual(executor["backend"], "codex")
+        self.assertEqual(executor["model"], "gpt-6.1-sol")
+        self.assertEqual(executor["reasoning_effort"], "ultra")
         self.assertEqual(executor["toolsets"], ["file", "terminal", "todo", "baton-memory"])
         self.assertTrue(executor["escalation"]["enabled"])
         for key in ("service_tier", "disable_fast_mode", "sandbox", "extra_config"):
@@ -49,10 +49,10 @@ class GoliveTests(unittest.TestCase):
                                               relink=False, fresh=False, upgrade_profile=False,
                                               migrate=False))
         written = json.loads((root / "baton.json").read_text(encoding="utf-8"))
-        self.assertEqual(written["conductor"]["model"], "opus")
-        self.assertEqual(written["monitor"]["model"], "gpt-5.6-sol")
-        self.assertEqual(written["executor"]["backend"], "hermes")
-        self.assertEqual(written["executor"]["model"], "gpt-5.6-luna")
+        self.assertEqual(written["conductor"]["model"], "gpt-6-astra")
+        self.assertEqual(written["monitor"]["model"], "gpt-5.6-luna")
+        self.assertEqual(written["executor"]["backend"], "codex")
+        self.assertEqual(written["executor"]["model"], "gpt-6.1-sol")
 
     def test_review_reference_example_uses_adopt_reject_and_parses(self):
         text = (ROOT / "skills/baton/references/review.md").read_text(encoding="utf-8")

@@ -56,7 +56,7 @@ class BatonJsonTests(unittest.TestCase):
         self.assertNotIn("judge", cfg)
         self.assertEqual(cfg["conductor"]["model"], "sonnet")
         self.assertFalse(cfg["conductor"]["council_for_major_decisions"])
-        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-sol")
+        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-luna")
         self.assertEqual(cfg["conductor"]["model"], "sonnet")
         self.assertFalse(cfg["conductor"]["council_for_major_decisions"])
         self.assertEqual(cfg["executor"]["model"], "layer3")
@@ -68,11 +68,11 @@ class BatonJsonTests(unittest.TestCase):
         tmp, root, project = self.project()
         self.addCleanup(tmp.cleanup)
         cfg = project.config
-        self.assertEqual(cfg["conductor"]["model"], "opus")
+        self.assertEqual(cfg["conductor"]["model"], "gpt-6-astra")
         self.assertTrue(cfg["conductor"]["council_for_major_decisions"])
-        self.assertEqual(cfg["executor"]["backend"], "hermes")
-        self.assertEqual(cfg["executor"]["model"], "gpt-5.6-luna")
-        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-sol")
+        self.assertEqual(cfg["executor"]["backend"], "codex")
+        self.assertEqual(cfg["executor"]["model"], "gpt-6.1-sol")
+        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-luna")
 
     def test_invalid_baton_json_is_an_error(self):
         tmp, root, project = self.project()
@@ -100,9 +100,9 @@ class BatonJsonTests(unittest.TestCase):
         self.assertTrue(path.exists())
         first = path.read_text(encoding="utf-8")
         data = json.loads(first)
-        self.assertEqual(data["conductor"], {"model": "opus", "council_for_major_decisions": True})
+        self.assertEqual(data["conductor"], {"model": "gpt-6-astra", "council_for_major_decisions": True})
         self.assertNotIn("judge", data)
-        self.assertEqual(data["monitor"]["model"], "gpt-5.6-sol")
+        self.assertEqual(data["monitor"]["model"], "gpt-5.6-luna")
         self.assertEqual(data["executor"]["backend"], "codex")
         path.write_text(json.dumps({"judge": {"model": "haiku"}}), encoding="utf-8")
         baton.cmd_init(project, Namespace(no_statusline=True))
@@ -117,8 +117,8 @@ class BatonJsonTests(unittest.TestCase):
                     "judge": {"model": "haiku", "council_for_major_decisions": False},
                 })
                 cfg = project.config
-                self.assertEqual(cfg["conductor"], {"model": "haiku", "council_for_major_decisions": False, "reasoning_effort": None})
-                self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-sol")
+                self.assertEqual(cfg["conductor"], {"model": "haiku", "council_for_major_decisions": False, "reasoning_effort": "ultra", "service_tier": "priority", "disable_fast_mode": False})
+                self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-luna")
                 self.assertNotIn("judge", cfg)
                 self.assertNotIn("conductor", json.loads((root / filename).read_text()))
 
@@ -135,7 +135,7 @@ class BatonJsonTests(unittest.TestCase):
                 raw["conductor"] = {"model": "sonnet", "council_for_major_decisions": True}
                 self.write_json(root / filename, raw)
                 cfg = project.config
-                self.assertEqual(cfg["conductor"], {"model": "sonnet", "council_for_major_decisions": True, "reasoning_effort": None})
+                self.assertEqual(cfg["conductor"], {"model": "sonnet", "council_for_major_decisions": True, "reasoning_effort": "ultra", "service_tier": "priority", "disable_fast_mode": False})
                 self.assertEqual(cfg["monitor"]["model"], "fable")
                 self.assertNotIn("judge", cfg)
 
@@ -175,11 +175,11 @@ class BatonJsonTests(unittest.TestCase):
             "judge": {"model": "haiku"},
         })
         self.write_json(root / "baton.json", {"conductor": {"model": "fable"}})
-        self.assertEqual(project.config["conductor"], {"model": "fable", "council_for_major_decisions": False, "reasoning_effort": None})
+        self.assertEqual(project.config["conductor"], {"model": "fable", "council_for_major_decisions": False, "reasoning_effort": "ultra", "service_tier": "priority", "disable_fast_mode": False})
         self.assertEqual(project.config["monitor"]["model"], "haiku")
         self.write_json(root / ".baton/config.json", {"judge": {"model": "haiku", "council_for_major_decisions": False}})
         self.write_json(root / "baton.json", {"conductor": {}})
-        self.assertEqual(project.config["conductor"], {"model": "opus", "council_for_major_decisions": True, "reasoning_effort": None})
+        self.assertEqual(project.config["conductor"], {"model": "gpt-6-astra", "council_for_major_decisions": True, "reasoning_effort": "ultra", "service_tier": "priority", "disable_fast_mode": False})
         self.assertEqual(project.config["monitor"]["model"], "haiku")
 
     def test_invalid_role_models_and_sections_raise_config_error(self):
@@ -224,7 +224,7 @@ class BatonJsonTests(unittest.TestCase):
         with patch.object(baton, "SKILL_DIR", str(skill)):
             self.assertEqual(project.config["conductor"], {"model": "haiku", "council_for_major_decisions": False})
             self.assertEqual(project.config["executor"]["backend"], "codex")
-            self.assertEqual(project.config["monitor"]["model"], "gpt-5.6-sol")
+            self.assertEqual(project.config["monitor"]["model"], "gpt-5.6-luna")
             self.assertTrue(project.needs_backend_migration)
             self.write_json(root / "baton.json", {"executor": {"backend": "codex"}})
             self.assertEqual(project.config["executor"]["backend"], "codex")
@@ -251,9 +251,9 @@ class BatonJsonTests(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             baton.cmd_config(project, Namespace(json=False))
         summary = out.getvalue()
-        self.assertTrue(summary.startswith("BATON::CONFIG judge=sonnet executor=gpt-5.6-luna effort=xhigh conductor=sonnet backend=codex project_id="))
-        for expected in ("conductor.model：sonnet", "monitor.model：gpt-5.6-sol", "monitor.reasoning_effort：None",
-                         "monitor.final_reasoning_effort：None", "monitor.timeout_minutes：40", "executor.backend：codex",
+        self.assertTrue(summary.startswith("BATON::CONFIG judge=sonnet executor=gpt-6.1-sol effort=ultra conductor=sonnet backend=codex project_id="))
+        for expected in ("conductor.model：sonnet", "monitor.model：gpt-5.6-luna", "monitor.reasoning_effort：max",
+                         "monitor.final_reasoning_effort：max", "monitor.timeout_minutes：40", "executor.backend：codex",
                          os.path.realpath(str(root)), project.project_id, project.state_dir,
                          "迁移提示", "Hermes", "第 4 阶段", "baton init --migrate"):
             self.assertIn(expected, summary)
@@ -261,11 +261,11 @@ class BatonJsonTests(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             baton.cmd_config(project, Namespace(json=True))
         marker, payload = out.getvalue().split("\n", 1)
-        self.assertTrue(marker.startswith("BATON::CONFIG judge=sonnet executor=gpt-5.6-luna effort=xhigh conductor=sonnet backend=codex project_id="))
+        self.assertTrue(marker.startswith("BATON::CONFIG judge=sonnet executor=gpt-6.1-sol effort=ultra conductor=sonnet backend=codex project_id="))
         cfg = json.loads(payload)
         self.assertEqual(cfg["conductor"]["model"], "sonnet")
         self.assertNotIn("judge", cfg)
-        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-sol")
+        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-luna")
         self.assertEqual(cfg["executor"]["backend"], "codex")
         # the project root is canonical: the real path, with the on-disk letter case
         self.assertEqual(cfg["project"], {"root": os.path.realpath(str(root)), "id": project.project_id,
@@ -298,7 +298,7 @@ class BatonJsonTests(unittest.TestCase):
             baton.cmd_init(project, Namespace(no_statusline=True))
         cfg = json.loads((root / "baton.json").read_text())
         self.assertEqual(cfg["conductor"], {"model": "haiku", "council_for_major_decisions": False})
-        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-sol")
+        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-luna")
         self.assertNotIn("judge", cfg)
         self.assertEqual(cfg["executor"]["backend"], "codex")
         self.assertFalse(project.needs_backend_migration)

@@ -1,0 +1,9 @@
+{
+  "_comment": "Codex council config. launch.sh reads chief_model and chief_reasoning_effort; council.sh reads councilors[].",
+  "chief_model": "gpt-6-astra",
+  "chief_reasoning_effort": "ultra",
+  "councilors": [
+    "council-cc-opus",
+    "council-codex-sol"
+  ]
+}

@@ -226,7 +226,10 @@ class ConfigError(Exception):
     """A project configuration error that should be shown to the caller."""
 
 
-CONDUCTOR_MODELS = {"opus", "sonnet", "haiku", "fable"}
+# Models accepted for the main conductor session. Keep Claude aliases separate
+# because they also select the Claude monitor transport.
+CONDUCTOR_MODELS = {"opus", "sonnet", "haiku", "fable", "gpt-6-astra"}
+CLAUDE_MONITOR_MODELS = {"opus", "sonnet", "haiku", "fable"}
 MODES = {"standard", "lean"}
 CAPACITY_RETRY_DEFAULTS = {"immediate": 3, "delayed": 1, "delayed_minutes": 15}
 
@@ -257,7 +260,7 @@ def validate_config(cfg):
         if role == "conductor":
             if not isinstance(model, str) or model not in CONDUCTOR_MODELS:
                 raise ConfigError(
-                    f"conductor.model 的值 {model!r} 无效，只能是 opus、sonnet、haiku 或 fable"
+                    f"conductor.model 的值 {model!r} 无效，只能是 opus、sonnet、haiku、fable 或 gpt-6-astra"
                 )
         elif not isinstance(model, str) or not model.strip():
             raise ConfigError("monitor.model 必须是非空字符串")
@@ -310,6 +313,11 @@ def validate_config(cfg):
         raise ConfigError("executor.capacity_retry.delayed_minutes 必须是大于 0 的有限数字")
     if not isinstance(cfg.get("supervision"), dict):
         raise ConfigError("配置中的 supervision 必须是 JSON object")
+    approvals = cfg.get("approvals", {})
+    if not isinstance(approvals, dict):
+        raise ConfigError("配置中的 approvals 必须是 JSON object")
+    if not isinstance(approvals.get("delegate_to_conductor", False), bool):
+        raise ConfigError("approvals.delegate_to_conductor 必须是布尔值")
     if not isinstance(cfg.get("freeze"), dict):
         raise ConfigError("配置中的 freeze 必须是 JSON object")
     memory = cfg.get("memory", {})
@@ -1485,7 +1493,7 @@ def _monitor_effort(cfg, dossier_kind):
 
 
 def _monitor_result_from_files(project, dossier_id, model, output_path, stdout):
-    if model in CONDUCTOR_MODELS:
+    if model in CLAUDE_MONITOR_MODELS:
         try:
             value = json.loads(stdout or "")
         except (TypeError, ValueError):
@@ -1512,7 +1520,7 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
     env = dict(os.environ)
     curation = dossier_kind == "curation"
     schema_path = os.path.join(TEMPLATES, "monitor-curation.schema.json" if curation else "monitor-brief.schema.json")
-    if model in CONDUCTOR_MODELS:
+    if model in CLAUDE_MONITOR_MODELS:
         env.update({"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                     "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
         command = _monitor_claude_command(project, dossier_id, cfg, effort, schema_path=schema_path)
@@ -1533,7 +1541,7 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
     event_stream = error_stream = None
     stdout = stderr = ""
     try:
-        if model in CONDUCTOR_MODELS:
+        if model in CLAUDE_MONITOR_MODELS:
             proc = subprocess.Popen(command, cwd=dossier_path(project, dossier_id), stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
                                     start_new_session=True)
@@ -1563,7 +1571,7 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
             event_stream.close()
         if error_stream:
             error_stream.close()
-        if model in CONDUCTOR_MODELS:
+        if model in CLAUDE_MONITOR_MODELS:
             stdout = stdout or ""
             stderr = stderr or ""
         else:
@@ -1574,7 +1582,7 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
             event_stream.close()
         if error_stream:
             error_stream.close()
-    if model in CONDUCTOR_MODELS:
+    if model in CLAUDE_MONITOR_MODELS:
         with open(stdout_path, "w", encoding="utf-8") as stream:
             stream.write(stdout or "")
         with open(stderr_path, "w", encoding="utf-8") as stream:
@@ -1613,7 +1621,7 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
     schema_path = os.path.join(TEMPLATES, "monitor-check.schema.json")
     effort = _monitor_effort(cfg, "report")
     env = dict(os.environ)
-    if model in CONDUCTOR_MODELS:
+    if model in CLAUDE_MONITOR_MODELS:
         env.update({"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                     "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
         command = _monitor_claude_command(project, dossier_id, cfg, effort, schema_path=schema_path)
@@ -1633,7 +1641,7 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
     event_stream = error_stream = None
     stdout = stderr = ""
     try:
-        if model in CONDUCTOR_MODELS:
+        if model in CLAUDE_MONITOR_MODELS:
             proc = subprocess.Popen(command, cwd=dossier_path(project, dossier_id), stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
                                     start_new_session=True)
@@ -1665,7 +1673,7 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
             event_stream.close()
         if error_stream:
             error_stream.close()
-    if model in CONDUCTOR_MODELS:
+    if model in CLAUDE_MONITOR_MODELS:
         _dossier_write(stdout_path, stdout or "")
         _dossier_write(stderr_path, stderr or "")
     else:
@@ -1674,7 +1682,7 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
         if is_capacity_failure(events_path, stderr_path, returncode=proc.returncode):
             return None, "轮中检查容量不足", attempt, "capacity"
         return None, (stderr or "轮中检查进程失败").strip()[-1000:], attempt, "process"
-    if model in CONDUCTOR_MODELS:
+    if model in CLAUDE_MONITOR_MODELS:
         try:
             wrapper = json.loads(stdout or "")
         except (TypeError, ValueError):
@@ -1928,7 +1936,7 @@ def _set_monitor_running(state, leg_n, dossier_id, pid, attempt, started):
 
 def _monitor_state_update(project, task, dossier_id, leg_n, status, **extra):
     def update(s):
-        if str(dossier_id).startswith(str(task) + "-curate-"):
+        if leg_n is None:
             monitor = dict(s.get("curation_monitor") or {})
             if status == "failed" and monitor.get("status") == "completed":
                 return
@@ -1954,6 +1962,11 @@ def _monitor_state_update(project, task, dossier_id, leg_n, status, **extra):
 
 def _monitor_wait_update(project, task, dossier_id, leg_n, wait):
     def update(s):
+        if leg_n is None:
+            monitor = dict(s.get("curation_monitor") or {})
+            monitor.update({"id": dossier_id, "status": "running", "capacity_wait": wait})
+            s["curation_monitor"] = monitor
+            return
         leg = next((x for x in s.get("legs", []) if x.get("n") == leg_n), None)
         if leg is not None:
             monitor = dict(leg.get("monitor") or {})
@@ -1966,6 +1979,11 @@ def _monitor_wait_update(project, task, dossier_id, leg_n, wait):
 
 def _monitor_wait_clear(project, task, dossier_id, leg_n):
     def update(s):
+        if leg_n is None:
+            monitor = dict(s.get("curation_monitor") or {})
+            monitor.pop("capacity_wait", None)
+            s["curation_monitor"] = monitor
+            return
         leg = next((x for x in s.get("legs", []) if x.get("n") == leg_n), None)
         if leg is not None:
             monitor = dict(leg.get("monitor") or {})
@@ -1978,9 +1996,11 @@ def _wait_monitor_capacity(project, task, dossier_id, leg_n, delay, retry_no, ph
     wait = {"phase": phase, "retry": retry_no, "started_at": now(),
             "next_retry_at": now() + max(0.0, delay)}
     _monitor_wait_update(project, task, dossier_id, leg_n, wait)
-    stop_flag = project.leg_path(task, leg_n, "stop")
+    # A curation monitor has no leg; its capacity wait is task-level and is not
+    # interrupted by a leg stop marker.  Ordinary monitors retain the leg marker.
+    stop_flag = None if leg_n is None else project.leg_path(task, leg_n, "stop")
     while now() < wait["next_retry_at"]:
-        if os.path.exists(stop_flag):
+        if stop_flag and os.path.exists(stop_flag):
             _monitor_wait_clear(project, task, dossier_id, leg_n)
             return False
         time.sleep(min(0.2, max(0.01, wait["next_retry_at"] - now())))
@@ -4434,6 +4454,50 @@ def _glob_paths(project, patterns, all_files=None):
     return out
 
 
+def _scope_entry_path(entry):
+    """Return the file-pattern part of a scope entry, dropping a pytest node id."""
+    return entry.split("::", 1)[0]
+
+
+def _scope_covers(lock_entry, allow_entry):
+    """Whether a lock path covers an allow path by the scope path rules."""
+    lock_path = _scope_entry_path(lock_entry)
+    allow_path = _scope_entry_path(allow_entry)
+    while lock_path.startswith("./"):
+        lock_path = lock_path[2:]
+    while allow_path.startswith("./"):
+        allow_path = allow_path[2:]
+    lock_path = lock_path.rstrip("/") or "."
+    allow_path = allow_path.rstrip("/") or "."
+    if lock_path == allow_path:
+        return True
+    if any(char in lock_path + allow_path for char in "*?["):
+        return False
+    return lock_path == "." or allow_path.startswith(lock_path + "/")
+
+
+def _validate_start_scope(project, scope):
+    """Reject contradictory or stale acceptance rules before creating a task baseline."""
+    all_files = list(_walk_code_files(project))
+    conflicts = []
+    for key in ("acceptance", "frozen"):
+        for entry in scope.get(key, []):
+            if any(_scope_covers(entry, allow)
+                   for allow in scope.get("allow", [])):
+                conflicts.append(entry)
+    missing = [entry for entry in scope.get("acceptance", [])
+               if not _glob_paths(project, [_scope_entry_path(entry)], all_files)]
+    errors = []
+    if conflicts:
+        errors.append("acceptance/frozen 与 allow 冲突：" + ", ".join(sorted(set(conflicts)))
+                     + "；请从 allow 移除锁定项")
+    if missing:
+        errors.append("acceptance 未匹配到项目中已存在的测试文件：" + ", ".join(missing)
+                     + "；acceptance 只能列已存在的测试，新测试放 allow，文字标准写简报正文")
+    if errors:
+        die("baton-scope 校验失败：" + "；".join(errors))
+
+
 def _section_lines(text, header):
     """Return the exact TOML/INI section text, including its section header."""
     lines = text.splitlines(True)
@@ -4872,7 +4936,8 @@ def _acceptance_failures(tests, acceptance):
         prefix = prefix.rstrip("/")
         matched = [test for test in tests if test["nodeid"] == prefix
                    or test["nodeid"].startswith(prefix + "/")
-                   or test["nodeid"].startswith(prefix + "::")]
+                   or test["nodeid"].startswith(prefix + "::")
+                   or test["nodeid"].startswith(prefix + "[")]
         if not matched:
             failures.append({"nodeid": prefix, "reason": "not collected"})
             continue
@@ -5007,6 +5072,7 @@ def run_verification(project, task, st, cfg, leg_n=None, baseline=False, skip_re
         if tests and scope.get("acceptance") and not any(
                 test["nodeid"].startswith(str(prefix).rstrip("/") + "/")
                 or test["nodeid"].startswith(str(prefix).rstrip("/") + "::")
+                or test["nodeid"].startswith(str(prefix).rstrip("/") + "[")
                 or test["nodeid"] == str(prefix).rstrip("/")
                 for test in tests for prefix in scope.get("acceptance", [])):
             result["acceptance_hint"] = "已收集到测试，但没有匹配验收前缀；可能是 pytest rootdir 不在项目根。"
@@ -5128,11 +5194,11 @@ def _normalize_amendments(items):
     for item in items or []:
         if isinstance(item, str):
             out.append({"id": os.path.basename(item).split(".", 1)[0], "path": item,
-                        "after_leg": 0, "relax": False})
+                        "after_leg": 0, "relax": False, "approver": "user"})
         elif isinstance(item, dict) and item.get("path"):
             out.append({"id": item.get("id") or os.path.basename(item["path"]).split(".", 1)[0],
                         "path": item["path"], "after_leg": int(item.get("after_leg") or 0),
-                        "relax": bool(item.get("relax"))})
+                        "relax": bool(item.get("relax")), "approver": item.get("approver", "user")})
     return out
 
 
@@ -5197,6 +5263,11 @@ def _open_tty():
     return _TerminalPrompt()
 
 
+def _confirmation_delegated(project, task):
+    cfg = config_for_state(project, project.read_state(task, {}) or {})
+    return bool((cfg or {}).get("approvals", {}).get("delegate_to_conductor", False))
+
+
 def _require_task_confirmation(task):
     try:
         tty = _open_tty()
@@ -5210,6 +5281,7 @@ def _require_task_confirmation(task):
         tty.close()
     if answer != task:
         raise ConfigError("任务名确认不匹配，未执行放宽操作")
+    return "user"
 
 
 def _adopt_freeze_entries(project, task, manifest, paths):
@@ -5368,8 +5440,13 @@ def cmd_amend(project, args):
         die("amend 至少需要修正案文件、--config 或 --adopt")
     if relax and not args.user_approved:
         die("这是放宽冻结或验证标准的操作，请加 --user-approved 并在 /dev/tty 逐字确认任务名")
+    approver = "user"
     if args.user_approved:
-        _require_task_confirmation(args.task)
+        if _confirmation_delegated(project, args.task):
+            print("已按 approvals.delegate_to_conductor 由 conductor 代为确认")
+            approver = "conductor-delegated"
+        else:
+            _require_task_confirmation(args.task)
     if adopt:
         manifest = _adopt_freeze_entries(project, args.task, manifest, adopt)
     amendment_path = None
@@ -5390,6 +5467,7 @@ def cmd_amend(project, args):
         state_update["amendments"] = _normalize_amendments(st.get("amendments")) + [{
             "id": os.path.splitext(os.path.basename(amendment_path))[0],
             "path": amendment_path, "after_leg": len(st.get("legs", [])), "relax": relax,
+            "approver": approver,
         }]
     project.update_state(args.task, lambda state: state.update(state_update))
     write_json(os.path.join(freeze_dir(project, args.task), "manifest.json"), manifest)
@@ -6390,9 +6468,6 @@ def _profile_credential_entries(path):
     return found
 
 
-def _credential_identity(entry):
-    if not isinstance(entry, dict):
-        return ""
 def executor_provider(cfg):
     """The Hermes provider the executor runs on (openai-codex unless baton.json says otherwise)."""
     value = ((cfg.get("executor") or {}).get("provider") or "openai-codex")
@@ -6424,6 +6499,9 @@ def _profile_provider_credentials(path, provider):
     return found
 
 
+def _credential_identity(entry):
+    if not isinstance(entry, dict):
+        return ""
     for key in ("account_id", "accountId", "chatgpt_account_id", "user_id", "userId", "email", "id"):
         value = entry.get(key)
         if isinstance(value, str) and value:
@@ -6999,6 +7077,8 @@ def cmd_start(project, args):
         die(f"任务 {args.task} 已 closed，不能 start")
     cfg = config_for_state(project, st)
     scope = parse_scope(brief, required=not bool(st.get("legs")))
+    if scope is not None and not st.get("legs"):
+        _validate_start_scope(project, scope)
     if scope and scope.get("verify") == "auto" and not (cfg.get("supervision") or {}).get("test_command"):
         die("supervision.test_command 为空；范围块 verify=auto 时必须配置验证命令，或写 verify=none")
     if st.get("thread_id"):
@@ -7070,11 +7150,13 @@ def _resume_ruling_gate(project, task, st, action="resume"):
     dossier_id = (leg.get("dossier") or {}).get("id") or monitor.get("id")
     if leg.get("executor_status", leg.get("status")) not in ("report", "done", "violation") or not dossier_id:
         return None
-    if monitor.get("status") in ("running", "failed") or curation_monitor.get("status") in ("running", "failed"):
+    if monitor.get("status") in ("running", "failed") or curation_monitor.get("status") == "running":
         active_monitor = monitor if monitor.get("status") in ("running", "failed") else curation_monitor
         state = "仍在运行" if active_monitor["status"] == "running" else "已失败"
         die(f"卷宗 {dossier_id} 的 monitor {state}；可以等待、baton monitor {task} {dossier_id} --rerun 或问用户；"
             f"监督简报完成后先 baton rule，再 {action}")
+    if curation_monitor.get("status") == "failed":
+        print(f"提示：记忆整理 monitor 已失败；可稍后 baton monitor {task} --curate 重跑。")
     if not verify_ledger(project):
         die("账本校验失败，拒绝续跑")
     good, error = verify_dossier(project, dossier_id)
@@ -7151,7 +7233,10 @@ def cmd_resume(project, args, message=None):
     if count >= 3 and not getattr(args, "user_approved_continue", False):
         die(f"REVISE 已累计 {count} 次（事项 {key}），请用户确认后加 --user-approved-continue，并逐字确认任务名")
     if count >= 3:
-        _require_task_confirmation(args.task)
+        if _confirmation_delegated(project, args.task):
+            print("已按 approvals.delegate_to_conductor 由 conductor 代为确认")
+        else:
+            _require_task_confirmation(args.task)
     message = message if message is not None else _resume_message(project, args, st)
     if verdict and not getattr(args, "verdict", None):
         print("提示：这一轮没有引用裁决原文，使用普通指挥消息续跑。")
@@ -7884,13 +7969,26 @@ def cmd_monitor(project, args):
     if leg.get("status") == "running" and (leg.get("monitor") or {}).get("status") != "running":
         die("执行者轮次仍在运行，等轮次结束后再运行 monitor")
     dossier = dossier_path(project, args.dossier)
-    if not os.path.isdir(dossier):
+    rebuild = (args.rerun and not os.path.isfile(os.path.join(dossier, "manifest.json"))
+               and args.dossier in ((leg.get("dossier") or {}).get("id"), (leg.get("monitor") or {}).get("id")))
+    if not os.path.isdir(dossier) and not rebuild:
         die(f"找不到卷宗 {args.dossier}")
     brief_path = project.p("reviews", args.dossier + "-brief.md")
     if os.path.exists(brief_path) and not args.rerun:
         die(f"卷宗 {args.dossier} 已有监督简报；需要重跑请加 --rerun")
     if (leg.get("monitor") or {}).get("status") == "running":
         die("monitor 已在运行，请用 baton wait 等待")
+    if rebuild:
+        status = leg.get("executor_status") or leg.get("status")
+        try:
+            actual_id = build_dossier(project, args.task, st, leg, status)
+        except Exception as error:
+            die(f"重建卷宗 {args.dossier} 失败：{error}")
+        if not actual_id:
+            die(f"重建卷宗 {args.dossier} 失败：当前轮结论或 monitor 配置不支持构建卷宗")
+        args.dossier = actual_id
+        project.update_state(args.task, lambda s: current_leg(s).update(
+            dossier={"id": actual_id, "type": dossier_type_for(status)}))
     kind = dossier_manifest(project, args.dossier).get("type") or dossier_type_for(leg.get("executor_status") or leg.get("status"))
     if kind not in MONITOR_RECOMMENDATIONS:
         kind = dossier_type_for(leg.get("executor_status") or leg.get("status"))
@@ -7972,9 +8070,10 @@ def cmd_monitor_run(project, args):
         curation_cfg = dict(cfg)
         curation_cfg["monitor"] = dict(cfg.get("monitor") or {},
                                         model=(cfg.get("memory") or {}).get("curation_model", "sonnet"))
-        run_monitor_lifecycle(project, args.task, args.dossier, kind, curation_cfg, None, "curation")
-        project.update_state(args.task, lambda s: s.update(curation_monitor={"id": args.dossier,
-            "status": "completed", "ended_at": now()}))
+        completed = run_monitor_lifecycle(project, args.task, args.dossier, kind, curation_cfg, None, "curation")
+        if completed:
+            project.update_state(args.task, lambda s: s.update(curation_monitor={"id": args.dossier,
+                "status": "completed", "ended_at": now()}))
         return
     leg = current_leg(st)
     if not leg:
@@ -8779,6 +8878,7 @@ def cmd_config(project, args):
     for key in ("interval_minutes", "max_unsupervised_minutes", "first_check_minutes", "max_check_minutes",
                 "unhandled_stop_minutes", "rule_check_seconds", "check_summary_max_chars"):
         print(f"supervision.{key}：{cfg['supervision'].get(key)}")
+    print(f"approvals.delegate_to_conductor：{cfg['approvals'].get('delegate_to_conductor', False)}")
     print("配置层：")
     for path, exists in project.config_paths():
         print(f"- {path}：{'存在' if exists else '缺失'}")
@@ -8935,7 +9035,10 @@ def cmd_memory(project, args):
             raise SystemExit(1)
     elif args.memory_action == "reanchor":
         task = getattr(args, "task", "") or ""
-        _require_task_confirmation(task)
+        if _confirmation_delegated(project, task):
+            print("已按 approvals.delegate_to_conductor 由 conductor 代为确认")
+        else:
+            _require_task_confirmation(task)
         try:
             head = ledger.reanchor(lambda _: True)
         except LedgerError as exc:
@@ -8950,13 +9053,18 @@ def cmd_memory(project, args):
         print("已补建 %d 条记忆索引" % count)
 
 
-def council_dir():
+def council_dir(conductor_model=None):
+    """Return the council skill directory for the active conductor transport."""
+    if conductor_model is not None and conductor_model not in CLAUDE_MONITOR_MODELS:
+        codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+        return os.path.join(codex_home, "skills", "council")
     return os.path.join(skills_dir(), "council")
 
 
-def council_check():
+def council_check(directory=None):
     """(level, message) about council's config.json and the councilor functions it names."""
-    cfg_path = os.path.join(council_dir(), "config.json")
+    root = directory or council_dir()
+    cfg_path = os.path.join(root, "config.json")
     cfg = read_json(cfg_path)
     note = ""
     if not isinstance(cfg, dict):
@@ -9012,8 +9120,10 @@ def cmd_doctor(project, args):
              f"模型 {ex['model']}，思考深度 {ex['reasoning_effort']}（可选：{'/'.join(efforts)}）")
     else:
         line("WARN", f"models_cache 里没找到 {ex['model']}（可能只是缓存未刷新）")
-    line("OK" if ex.get("service_tier") != "priority" and ex.get("disable_fast_mode") else "WARN",
-         f"service_tier={ex.get('service_tier')}，disable_fast_mode={ex.get('disable_fast_mode')}（加速模式应关闭）")
+    fast_enabled = ex.get("service_tier") == "priority" and ex.get("disable_fast_mode") is False
+    line("OK" if fast_enabled else "WARN",
+         f"service_tier={ex.get('service_tier')}，disable_fast_mode={ex.get('disable_fast_mode')}"
+         f"（Fast 模式{'已开启' if fast_enabled else '未开启'}）")
     data = safe_quota(block=True)
     desc = codex_quota.describe(data)
     if codex_quota.is_low(data):
@@ -9029,11 +9139,14 @@ def cmd_doctor(project, args):
         line("WARN", f"PATH 上的 baton（{on_path}）不是这个 skill 的，请改用 {launcher} 或处理同名冲突")
     else:
         line("OK", f"baton 命令：{on_path}")
-    council = os.path.join(council_dir(), "scripts", "launch.sh")
+    conductor_model = cfg["conductor"]["model"]
+    council_root = council_dir(conductor_model)
+    council = os.path.join(council_root, "scripts", "launch.sh")
+    install_hint = "--council" if conductor_model in CLAUDE_MONITOR_MODELS else "--council-codex"
     line("OK" if os.path.exists(council) else "WARN",
-         "council skill：" + ("已安装" if os.path.exists(council) else f"未安装（{council_dir()}，./install.sh --council）"))
+         "council skill：" + ("已安装" if os.path.exists(council) else f"未安装（{council_root}，./install.sh {install_hint}）"))
     if os.path.exists(council):
-        line(*council_check())
+        line(*council_check(council_root))
     top = git_repo_top(project.root)
     line("OK", f"项目 {project.root}（id {project.project_id}）："
          + (f"在 git 仓库里，git 顶层 {top}" if top else "不是 git 仓库"))
@@ -9086,7 +9199,7 @@ def run_monitor_probe(project, cfg, line):
         monitor_cfg = dict(cfg)
         monitor_cfg["monitor"] = dict(cfg.get("monitor") or {}, model=(cfg.get("monitor") or {}).get("model", "gpt-5.6-sol"))
         monitor_model = monitor_cfg["monitor"]["model"]
-        if monitor_model in CONDUCTOR_MODELS:
+        if monitor_model in CLAUDE_MONITOR_MODELS:
             result["codex_skipped"] = True
             line("OK", f"Codex monitor 探针：monitor.model={monitor_model} 是 Claude 别名，已跳过")
         else:

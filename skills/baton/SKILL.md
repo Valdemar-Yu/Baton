@@ -1,43 +1,36 @@
 ---
 name: baton
 description: >-
-  Claude 作为唯一决策者的 conductor，调用 Hermes profile baton-exec-v2 上的 gpt-5.6-luna 执行编码任务，困难轮次升级到 gpt-6.1-sol；独立 monitor 只读证据并写监督简报，记忆由 mem0 和本地 Ollama 提供。conductor 写简报、处理裁决和监管，不审原始代码、不亲手改执行者负责的代码。触发：让 codex 干活、指挥 codex、交给 codex / GPT 执行、Claude 监工 Codex、/baton、delegate to codex、hermes。
+  对所有需要创建、修改、重构、调试、测试或审阅代码的任务，使用 Baton 的 conductor、monitor、executor 流程。默认 conductor 为 gpt-6-astra ultra，executor 为 gpt-6.1-sol ultra，二者开启 Codex Fast；monitor 使用 gpt-5.6-luna 的最高可用 effort（max）并只读证据。触发：任何 coding、code、编程、修复、实现、重构、测试任务，或 /baton、delegate to codex。
 ---
 
 # Baton：conductor、monitor、executor
 
-你是主会话的 **conductor**，也是唯一决策者。你定义任务边界、写简报、读取 monitor 的证据简报、用 `baton rule` 裁决并决定是否续跑。代码审阅由独立 monitor 完成；你不直接审原始代码、不亲手修改 executor 负责的代码。需要改动时写消息交给 executor，涉及用户选择的动作由用户在自己的终端执行。
+你是 Codex 主会话的 **conductor**，也是唯一决策者。你定义任务边界、写简报、读取 monitor 的证据简报、用 `baton rule` 裁决并决定是否续跑。代码审阅由独立 monitor 完成；你不直接审原始代码、不亲手修改 executor 负责的代码。需要改动时写消息交给 executor，涉及用户选择的动作由用户在自己的终端执行。
 
 三个角色各自只有一条职责线：
 
 | 角色 | 默认运行位置 | 负责 |
 |---|---|---|
-| conductor | Claude 主会话，模型对应 `conductor.model` | 简报、范围和决策；处理事件、裁决、最终验收 |
-| executor | Hermes `baton-exec-v2`，默认 `gpt-5.6-luna`，困难轮升级 `gpt-6.1-sol` | 按简报改代码、验证、记录 `.baton/log.md`、交小修改日志或大修改 HTML 汇报 |
-| monitor | 独立只读进程，模型由 `monitor.model` 决定 | 只读卷宗、快照、章程、判例和消息，写监督简报；不做决定、不与 executor 对话 |
+| conductor | Codex 主会话，`gpt-6-astra` / `ultra` / Fast | 简报、范围和决策；处理事件、裁决、最终验收 |
+| executor | Codex CLI，`gpt-6.1-sol` / `ultra` / Fast | 按简报改代码、验证、记录 `.baton/log.md`、交小修改日志或大修改 HTML 汇报 |
+| monitor | Codex 独立只读进程，`gpt-5.6-luna` / `max` | 只读卷宗、快照、章程、判例和消息，写监督简报；不做决定、不与 executor 对话 |
 
 记忆使用 mem0、本地 Ollama 的 `baton-qwen3-embed:latest` 和项目外台账；Ollama 不可用时检索退回关键词，并在证据中写明原因。
 
 ## 启动一项任务
 
-在项目目录运行，先确认主会话模型与 `conductor.model` 一致；不一致时提醒用户执行 `/model <conductor.model>`。不要再用 v1 的 `judge.model` 派子 agent 当裁判。
+在项目目录运行，先确认主会话使用 `/model gpt-6-astra`、`/reasoning ultra`，并让 `service_tier="priority"` 保持 Codex Fast；不一致时提醒用户调整。不要再用 v1 的 `judge.model` 派子 agent 当裁判。
 
 ```bash
 baton doctor
 baton config
-baton init                    # 首次安装；需要跨 git 子目录时加 --accept-boundary
+baton init                    # 首次安装；默认使用 Codex executor
 baton memory install          # conductor 可直接运行；运行前告诉用户
-baton init --upgrade-profile  # 用户确认后覆盖 Hermes profile 模板
 baton new <task>
 ```
 
-`doctor` 会检查 codex、Hermes、profile、Ollama/记忆、台账、快照和 v1 指令告警。首次 init 会创建 `baton.json`、准备 `baton-exec-v2` profile，并打印登录提示；登录由用户执行：
-
-```bash
-hermes -p baton-exec-v2 auth add openai-codex --type oauth
-hermes -p baton-exec-v2 auth list openai-codex
-hermes -p baton-exec-v2 auth remove openai-codex <从根目录带进来的条目>
-```
+`doctor` 会检查 Codex、Ollama/记忆、台账、快照和 v1 指令告警。首次 init 会创建 `baton.json`；如果项目显式选择 Hermes backend，再按项目配置准备 `baton-exec-v2` profile。
 
 `baton memory install` 只写 `$BATON_HOME/venv` 和本地 Ollama 模型，运行前告诉用户。只有 Hermes 登录和带 `--user-approved` 的命令需要用户在自己的终端执行。写 `.baton/tasks/<task>/brief.md` 时填完整验收、允许/禁止路径和验证命令，并包含范围块：
 
@@ -47,9 +40,13 @@ hermes -p baton-exec-v2 auth remove openai-codex <从根目录带进来的条目
 ```
 ```
 
+`allow` 是 executor 可以修改或新建的路径，新写的回归测试放这里；`deny` 禁止触碰。
+`acceptance` 只列已存在、必须通过的测试文件或 pytest node id，它们属于锁定级，不能修改、删除或新建；不要列源码或待写的新测试，没有现成验收测试时留空 `[]`。
+`frozen` 列其他需要锁定的已有文件；`verify` 为 `auto` 时运行配置的验证命令，`none` 时跳过自动验证。验收标准的文字描述写在简报正文。
+
 确认简报后启动并交给后台等待：
 
-用 Claude Code 的 Bash 工具、设置 `run_in_background: true` 执行：
+用 Codex 的 shell 工具在后台执行：
 
 ```bash
 baton wait <task>
@@ -156,17 +153,20 @@ baton rule <task> <curation-dossier> <verdict-file> --curation
 
 ```json
 {
-  "conductor": {"model": "opus", "council_for_major_decisions": true},
-  "monitor": {"model": "gpt-5.6-sol", "reasoning_effort": null, "final_reasoning_effort": null},
+  "conductor": {"model": "gpt-6-astra", "reasoning_effort": "ultra", "service_tier": "priority", "disable_fast_mode": false, "council_for_major_decisions": true},
+  "monitor": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "final_reasoning_effort": "max"},
   "executor": {
-    "backend": "hermes", "hermes_profile": "baton-exec-v2", "model": "gpt-5.6-luna",
-    "reasoning_effort": "xhigh", "toolsets": ["file", "terminal", "todo", "baton-memory"],
-    "escalation": {"enabled": true, "model": "gpt-6.1-sol", "reasoning_effort": "xhigh"}
+    "backend": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "ultra",
+    "service_tier": "priority", "disable_fast_mode": false,
+    "toolsets": ["file", "terminal", "todo", "baton-memory"]
   },
   "memory": {"backend": "mem0", "embedder": {"provider": "ollama", "model": "qwen3-embedding:0.6b", "dims": 1024}},
   "mode": "standard",
-  "supervision": {"interval_minutes": 30, "max_unsupervised_minutes": 70}
+  "supervision": {"interval_minutes": 30, "max_unsupervised_minutes": 70},
+  "approvals": {"delegate_to_conductor": false}
 }
 ```
+
+无人值守运行（如评测）可在 `baton.json` 设 `"approvals": {"delegate_to_conductor": true}`；此时带 `--user-approved` 的命令由 conductor 直接执行，日常使用保持关闭。
 
 示例中的 `qwen3-embedding:0.6b` 是基础模型；实际运行使用由它派生的 `baton-qwen3-embed:latest`。

@@ -2,13 +2,13 @@
 
 # Baton
 
-Baton 让 Claude 负责决策和监督，让 Hermes 上的模型执行代码，并把每一轮的证据、裁决和记忆留下来，便于安全续跑。
+Baton 让 Codex 主会话负责决策和监督，让 Codex executor 执行代码，并把每一轮的证据、裁决和记忆留下来，便于安全续跑。Hermes backend 仍可由项目配置显式启用。
 
 ## 摘要
 
 让一个强模型指挥、另一个模型写代码，是 Claude Code 里常见的分工，难点在指挥手里的证据。v1 里 Opus 审的是执行者自己写的汇报，监督靠每 30 分钟读一次快照。执行者改了验收测试或者偏离了简报，指挥往往要等汇报交上来才知道，而那份汇报正是执行者写的。
 
-Baton v2 把这件事拆给三个角色，并把能机械检查的约束交给程序。conductor 是 Claude 主会话，也是唯一的决策者。executor 跑在本地 Hermes 上，默认用 gpt-5.6-luna，连续两次被驳回或方法卡住时升级到 gpt-6.1-sol。monitor 是隔离的只读进程，只读 baton 封存的卷宗，里面有完整 diff、本轮终点的代码快照和 baton 亲跑的逐条测试结果，它逐条列出偏离。conductor 必须对每条偏离写明采纳或驳回，裁决和监督简报一起写进哈希链账本，没有绑定当前卷宗的裁决，续跑就被拒绝。验收测试和测试配置在任务开始时冻结，runner 每 60 秒核对一次，越界即停。轮中监督由规则信号和 monitor 的退避式方向检查组成，conductor 只在出现偏离时被叫醒。
+Baton v2 把这件事拆给三个角色，并把能机械检查的约束交给程序。conductor 是 Codex 主会话，也是唯一的决策者，默认使用 gpt-6-astra、ultra 和 Fast。executor 默认使用 Codex CLI 的 gpt-6.1-sol、ultra 和 Fast。monitor 是隔离的只读进程，默认使用 gpt-5.6-luna 的最高可用 effort max；它只读 baton 封存的卷宗，里面有完整 diff、本轮终点的代码快照和 baton 亲跑的逐条测试结果，逐条列出偏离。conductor 必须对每条偏离写明采纳或驳回，裁决和监督简报一起写进哈希链账本，没有绑定当前卷宗的裁决，续跑就被拒绝。验收测试和测试配置在任务开始时冻结，runner 每 60 秒核对一次，越界即停。轮中监督由规则信号和 monitor 的退避式方向检查组成，conductor 只在出现偏离时被叫醒。
 
 这些取舍有两方面依据。council.skill [1] 在 SWE-bench Lite dev 的 23 个任务上报告，Sonnet 主 agent 引入多模型合议后，解决数从 8 升到 12 且没有回归，效果好于单一顾问。v2 因此让 monitor 默认用和 conductor 不同家族的模型，两边读同一份证据，各自的盲区不重合。记忆方面，Mem0 [2] 表明按需抽取和检索的记忆层相比把全部历史塞进上下文，p95 延迟降低 91%，token 成本降低九成以上。DolphinBench [3] 用真实任务考察记忆，指出最难的一步是 agent 意识到自己需要回忆，效果取决于模型、harness 和记忆系统的组合。Baton 据此每轮主动推送 10 条相关记忆和一个常驻块，执行者只拿到只读检索工具，写入由 monitor 提炼、conductor 核准。存储用 mem0 加本地 Ollama 嵌入，数据留在本机，台账为准，向量库随时可以重建。
 
@@ -18,9 +18,9 @@ v2 由 v1 的 Baton 自举开发，带 239 个单元测试和 5 个连接真实 
 
 <p align="center"><img src="assets/brand/baton-v2-banner.png" alt="conductor、executor、monitor" width="420"></p>
 
-- **conductor**：Claude 主会话，唯一决策者；写简报、定义范围、读取监督简报、裁决和最终验收。
-- **executor**：Hermes profile `baton-exec-v2` 上的 `gpt-5.6-luna`，困难轮自动升级到 `gpt-6.1-sol`；按简报改代码和验证。
-- **monitor**：独立只读进程，读取卷宗和快照写监督简报；不改代码、不替 conductor 做决定。
+- **conductor**：Codex 主会话，默认 `gpt-6-astra` / `ultra` / Fast，唯一决策者；写简报、定义范围、读取监督简报、裁决和最终验收。
+- **executor**：Codex CLI，默认 `gpt-6.1-sol` / `ultra` / Fast；按简报改代码和验证。
+- **monitor**：独立只读 Codex 进程，默认 `gpt-5.6-luna` / `max`；读取卷宗和快照写监督简报，不改代码、不替 conductor 做决定。
 
 记忆由 mem0、本地 Ollama 和 `baton-qwen3-embed:latest` 提供。Ollama 离线时会退回关键词检索并记录原因。
 
@@ -30,7 +30,7 @@ v2 由 v1 的 Baton 自举开发，带 239 个单元测试和 5 个连接真实 
 
 | | standard | lean |
 |---|---|---|
-| executor | gpt-5.6-luna xhigh，卡住时升级到 gpt-6.1-sol | gpt-5.6-luna medium，不升级 |
+| executor | gpt-6.1-sol ultra，Fast | gpt-5.6-luna medium，不升级 |
 | conductor 思考深度 | 不限 | medium（`baton` 管不了主会话，事件里会提示用户调整） |
 | monitor 与监督简报 | 每份汇报一份，裁决须逐条回应 | 不设 monitor，不生成卷宗 |
 | 轮中监督 | 规则信号加 monitor 方向检查，DRIFT/BREAKING 叫醒 conductor | 关闭，规则信号只附在轮末事件里 |

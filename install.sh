@@ -3,7 +3,8 @@
 #
 #   ./install.sh             skill (~/.claude/skills/baton) + `baton` CLI (~/.local/bin/baton)
 #   ./install.sh --council   only council.skill with Baton's councilor backends
-#   ./install.sh --all       both
+#   ./install.sh --council-codex  only the Codex council skill
+#   ./install.sh --all       Baton + Claude council + Codex council
 #
 # The Codex quota statusline is configured per project by `baton init` (or `baton statusline install`).
 # Re-running is safe: an existing non-symlink skill dir, a `baton` command that is not Baton's,
@@ -113,12 +114,52 @@ print(" ".join(n))' "${dst}/config.json" 2>/dev/null || echo "")
   fi
 }
 
+install_council_codex() {
+  local codex_home="${CODEX_HOME:-${HOME}/.codex}"
+  local dst="${codex_home}/skills/council"
+  if [[ -e "${dst}" || -L "${dst}" ]]; then
+    echo "council (Codex) 已安装：${dst}（保留原配置）"
+  else
+    mkdir -p "${codex_home}/skills"
+    cp -R "${REPO}/council/codex" "${dst}"
+    echo "council (Codex) ${dst}（顾问：council-cc-opus + council-codex-sol）"
+  fi
+  if [[ -e "${COUNCIL_DEF}" ]]; then
+    echo "保留已有 ${COUNCIL_DEF}"
+  else
+    mkdir -p "$(dirname "${COUNCIL_DEF}")"
+    cp "${REPO}/council/council-def.sh" "${COUNCIL_DEF}"
+    echo "backend ${COUNCIL_DEF}"
+  fi
+  # Keep the same councilor-function validation as the Claude installation.
+  local names missing
+  names=$(python3 -c '
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    c = {}
+c = c if isinstance(c, dict) else {}
+n = [x for x in (c.get("councilors") or []) if isinstance(x, str)] or ["council-cc-opus", "council-codex-sol"]
+if c.get("chief_backend"):
+    n.append(c["chief_backend"])
+print(" ".join(n))' "${dst}/config.json" 2>/dev/null || echo "")
+  # shellcheck disable=SC2086
+  missing=$(bash -c 'source "$1" >/dev/null 2>&1; shift; for f in "$@"; do type "$f" >/dev/null 2>&1 || echo "$f"; done' _ "${COUNCIL_DEF}" ${names})
+  if [[ -n "${missing}" ]]; then
+    echo "注意：${COUNCIL_DEF} 里没有定义这些顾问：$(echo ${missing})" >&2
+    echo "      把 ${REPO}/council/council-def.sh 整个文件追加到 ${COUNCIL_DEF} 末尾即可（函数自带默认值，不会覆盖你已有的设置）" >&2
+    STATUS=1
+  fi
+}
+
 [[ $# -eq 0 ]] && set -- --skill
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skill) install_skill; shift ;;
     --council) install_council; shift ;;
-    --all) install_skill; install_council; shift ;;
+    --council-codex) install_council_codex; shift ;;
+    --all) install_skill; install_council; install_council_codex; shift ;;
     -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac

@@ -93,7 +93,7 @@ class LeanModeTests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             baton.cmd_config(project, Namespace(json=False))
         lines = out.getvalue().splitlines()
-        self.assertTrue(lines[0].endswith("monitor=gpt-5.6-sol mode=lean"))
+        self.assertTrue(lines[0].endswith("monitor=gpt-5.6-luna mode=lean"))
         self.assertIn(baton.LEAN_HINT, lines)
         event = baton.leg_event_text(project, "task", {
             "n": 1, "status": "done", "started_at": 0, "ended_at": 1,

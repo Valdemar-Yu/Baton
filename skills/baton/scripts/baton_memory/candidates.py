@@ -7,6 +7,7 @@ host Python 3.9 and gives the dossier/rule paths one normalised representation.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -35,22 +36,22 @@ def _section(text: str) -> str:
 
 def _decode_block(raw: str) -> Any:
     raw = raw.strip()
-    # A report may use either a fenced block or a ``pre`` block.  Decode the
-    # first complete JSON array/object so explanatory prose around it is safe.
-    for pattern in (
-        r"```(?:json|memory-candidates)\s*\n(.*?)\n```",
-        r"<pre[^>]*data-memory-candidates[^>]*>(.*?)</pre>",
-        r"<script[^>]*type=[\"']application/json[\"'][^>]*data-memory-candidates[^>]*>(.*?)</script>",
+    # HTML blocks need one entity-decoding pass; fenced and bare JSON stay raw.
+    for pattern, is_html in (
+        (r"```(?:json|memory-candidates)\s*\n(.*?)\n```", False),
+        (r"<pre[^>]*data-memory-candidates[^>]*>(.*?)</pre>", True),
+        (r"<script[^>]*type=[\"']application/json[\"'][^>]*data-memory-candidates[^>]*>(.*?)</script>", True),
     ):
         match = re.search(pattern, raw, re.I | re.S)
         if match:
             raw = match.group(1).strip()
+            if is_html:
+                raw = html.unescape(raw)
             break
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Permit a JSON array embedded in a pre block containing HTML escaped
-        # text only when it is otherwise unambiguous.
+        # Permit explanatory prose around an otherwise complete JSON array/object.
         start = min([x for x in (raw.find("["), raw.find("{")) if x >= 0] or [-1])
         end = max(raw.rfind("]"), raw.rfind("}"))
         if start >= 0 and end >= start:
