@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse, json, os, pathlib, shlex, subprocess, sys, time, uuid, urllib.request
 from typing import Any
 
-STATUS = {"ok", "missing_auth", "capacity", "sandbox", "verifier", "task_failure", "adapter_unconfigured", "missing_snapshot"}
+STATUS = {"ok", "missing_auth", "capacity", "sandbox", "verifier", "task_failure", "adapter_unconfigured", "missing_snapshot", "relay_unavailable"}
 DEFAULT_GPU_DEVICES = os.environ.get("RSIBENCH_GPU_DEVICES", "6,7")
 
 def now() -> str:
@@ -106,7 +106,13 @@ def execute_one(root: pathlib.Path, task_id: str, cell: str, run_root: pathlib.P
         result["status"] = "adapter_unconfigured"; result["error"] = "set BATON_COMMAND to a reviewed Baton adapter command"; return result
     pre = model_preflight(); result["preflight"] = pre
     if not pre["auth_ok"]:
-        result["status"] = "missing_auth"; result["error"] = "Hermes openai-codex credentials are not active"; return result
+        if pre.get("driver") == "local_codex_relay":
+            result["status"] = "relay_unavailable"
+            result["error"] = pre.get("error") or "local Codex relay is not reachable"
+        else:
+            result["status"] = "missing_auth"
+            result["error"] = "Hermes openai-codex credentials are not active"
+        return result
     run_id = f"{task_id}-{cell}-{uuid.uuid4().hex[:8]}"; work = run_root / run_id; work.mkdir(parents=True, exist_ok=True)
     image = "rsibench-compat-" + task_id.replace("/", "-").replace("_", "-")[:100]
     rc, out, err = command("docker", "build", "-t", image, str(p / "environment"), timeout=900)

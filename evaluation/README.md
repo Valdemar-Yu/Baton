@@ -50,3 +50,15 @@ The 181-side runner defaults task containers to GPU devices `6,7` using explicit
 Docker device mappings (the host does not have the NVIDIA Docker runtime/CDI
 configured). Override with `RSIBENCH_GPU_DEVICES=...` on 181 if needed. The
 local Codex relay itself does not use 181 GPUs.
+
+If preflight reports `relay_unavailable` or `Connection refused`, restart the
+local relay and keep that terminal open. On 181, verify the reverse tunnel before
+starting a task:
+
+```bash
+curl -fsS -H "Authorization: Bearer $LOCAL_CODEX_RELAY_TOKEN" \
+  "$LOCAL_CODEX_RELAY_URL/health"
+```
+
+`LOCAL_CODEX_RELAY_URL` must be the plain value
+`http://127.0.0.1:18765`, without Markdown link brackets.
