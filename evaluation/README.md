@@ -1,24 +1,47 @@
 # Local Codex RSIBench driver
 
-This driver keeps model calls on the local machine and uses 181 only for Docker
-sandboxing and verification. It does not copy Codex/Hermes credentials to 181.
+There are two modes.
 
-First run a dry check:
-
-```bash
-python3 evaluation/rsibench_local_codex.py \
-  --task-id terminal-bench-adaptive-rejection-sampler --cell a0
-```
-
-A real pilot requires `--execute` and consumes local Codex quota:
+The direct local driver runs the orchestration command locally and uses 181 for
+Docker/verifier work:
 
 ```bash
 python3 evaluation/rsibench_local_codex.py \
   --task-id terminal-bench-adaptive-rejection-sampler --cell a0 --execute
-python3 evaluation/rsibench_local_codex.py \
-  --task-id terminal-bench-adaptive-rejection-sampler --cell baton --execute
 ```
 
-A0 invokes local `codex exec`. Baton initializes a local lean Baton project with
-Codex as its executor, then syncs the resulting workspace to 181 before the
-remote verifier runs. Results are stored under `.rsibench-local-runs/`.
+For the requested **remote-start mode**, keep a relay process running on the
+local machine. It owns the local Codex account and opens a reverse SSH tunnel;
+181 starts the benchmark command and sends prompts through that tunnel:
+
+```bash
+# local machine; keep this terminal alive
+python3 evaluation/rsibench_codex_relay.py --remote 181 --remote-port 18765
+```
+
+Copy the printed token into the 181 shell, then run on 181:
+
+```bash
+ROOT=$HOME/baton-rsibench-20261025
+export LOCAL_CODEX_RELAY_URL=http://127.0.0.1:18765
+export LOCAL_CODEX_RELAY_TOKEN='PASTE_THE_PRINTED_TOKEN'
+export LOCAL_CODEX_DIRECT=$ROOT/runner/remote_local_codex_direct.py
+export BATON_COMMAND="$ROOT/runner/run_baton_cell.sh {workspace} {task_id}"
+
+python3 "$ROOT/runner/rsibench_compat.py" \
+  --root "$ROOT/compatible-snapshot" \
+  --output "$ROOT/runner/a0-local-codex.json" \
+  execute-one --task-id terminal-bench-adaptive-rejection-sampler \
+  --cell a0 --execute
+
+python3 "$ROOT/runner/rsibench_compat.py" \
+  --root "$ROOT/compatible-snapshot" \
+  --output "$ROOT/runner/baton-local-codex.json" \
+  execute-one --task-id terminal-bench-adaptive-rejection-sampler \
+  --cell baton --execute
+```
+
+The remote runner starts Docker and the verifier on 181. The local relay invokes
+`codex exec` using the local OAuth account; no token is copied to 181. Results
+are stored under the remote runner directory. Stop the local relay with
+`Ctrl-C` after the run.
