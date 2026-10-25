@@ -5,3 +5,5 @@ __pycache__/
 .claude/settings.local.json.bak
 .baton/runs/
 .council/
+.rsibench-local-registry.json
+.rsibench-local-runs/
