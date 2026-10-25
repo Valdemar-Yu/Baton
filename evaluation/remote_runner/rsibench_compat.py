@@ -11,6 +11,7 @@ import argparse, json, os, pathlib, shlex, subprocess, sys, time, uuid, urllib.r
 from typing import Any
 
 STATUS = {"ok", "missing_auth", "capacity", "sandbox", "verifier", "task_failure", "adapter_unconfigured", "missing_snapshot"}
+DEFAULT_GPU_DEVICES = os.environ.get("RSIBENCH_GPU_DEVICES", "6,7")
 
 def now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -114,7 +115,15 @@ def execute_one(root: pathlib.Path, task_id: str, cell: str, run_root: pathlib.P
     cname = "rsibench-" + uuid.uuid4().hex[:12]; logs = work / "logs"; logs.mkdir()
     tests = p / "tests"; verifier = tests / "test.sh" if (tests / "test.sh").exists() else p / "run-tests.sh"
     if not verifier.exists(): result["status"] = "verifier"; result["error"] = "no test.sh/run-tests.sh"; return result
-    rc, out, err = command("docker", "run", "-d", "--name", cname, "-v", f"{work}:/app", "-v", f"{tests}:/tests:ro", "-v", f"{logs}:/logs", image, "sleep", "infinity")
+    gpu_devices = os.environ.get("RSIBENCH_GPU_DEVICES", DEFAULT_GPU_DEVICES).strip()
+    gpu_flags: list[str] = []
+    if gpu_devices:
+        selected = [item.strip() for item in gpu_devices.split(",") if item.strip().isdigit()]
+        for item in selected: gpu_flags += ["--device", f"/dev/nvidia{item}"]
+        for special in ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools"):
+            gpu_flags += ["--device", special]
+        result["gpu_devices"] = selected
+    rc, out, err = command("docker", "run", "-d", "--name", cname, *gpu_flags, "-e", f"CUDA_VISIBLE_DEVICES={gpu_devices}", "-v", f"{work}:/app", "-v", f"{tests}:/tests:ro", "-v", f"{logs}:/logs", image, "sleep", "infinity")
     if rc != 0:
         result["status"] = "sandbox"; result["error"] = (out + err)[-2000:]; return result
     try:

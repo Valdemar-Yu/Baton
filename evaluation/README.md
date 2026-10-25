@@ -45,3 +45,8 @@ The remote runner starts Docker and the verifier on 181. The local relay invokes
 `codex exec` using the local OAuth account; no token is copied to 181. Results
 are stored under the remote runner directory. Stop the local relay with
 `Ctrl-C` after the run.
+
+The 181-side runner defaults task containers to GPU devices `6,7` using explicit
+Docker device mappings (the host does not have the NVIDIA Docker runtime/CDI
+configured). Override with `RSIBENCH_GPU_DEVICES=...` on 181 if needed. The
+local Codex relay itself does not use 181 GPUs.
