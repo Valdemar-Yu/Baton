@@ -135,6 +135,8 @@ print("session_id: fake-session", file=sys.stderr)
         for args in (("init", "--no-statusline"), ("new", "hermes")):
             result = subprocess.run(cli + list(args), env=os.environ.copy(), capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(cli + ["harness", "approve", "hermes"], env=os.environ.copy(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
         brief = self.project_root / ".baton" / "tasks" / "hermes" / "brief.md"
         brief.write_text("```baton-scope\n" + json.dumps({"allow": [], "deny": [], "acceptance": [], "frozen": [], "verify": "none"}) + "\n```\n# hermes\n", encoding="utf-8")
         result = subprocess.run(cli + ["start", "hermes"], env=os.environ.copy(), capture_output=True, text=True)
@@ -454,6 +456,7 @@ print("session_id: fake-session", file=sys.stderr)
         env = os.environ.copy()
         self.assertEqual(subprocess.run(cli + ["init", "--no-statusline"], env=env, capture_output=True, text=True).returncode, 0)
         self.assertEqual(subprocess.run(cli + ["new", "e2e"], env=env, capture_output=True, text=True).returncode, 0)
+        self.assertEqual(subprocess.run(cli + ["harness", "approve", "e2e"], env=env, capture_output=True, text=True).returncode, 0)
         brief = self.project_root / ".baton" / "tasks" / "e2e" / "brief.md"
         brief.write_text("```baton-scope\n" + json.dumps({"allow": [], "deny": [], "acceptance": [], "frozen": [], "verify": "none"}) + "\n```\n# e2e\n", encoding="utf-8")
         self.assertEqual(subprocess.run(cli + ["start", "e2e"], env=env, capture_output=True, text=True).returncode, 0)

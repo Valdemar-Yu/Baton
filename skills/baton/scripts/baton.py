@@ -47,13 +47,15 @@ import codex_quota  # noqa: E402
 import statusline as baton_statusline  # noqa: E402
 
 # Baton's own records never count as code: not at the top, and not in a nested project either.
-EXCLUDE = [":(exclude,glob)**/.baton/**", ":(exclude,glob)**/.council/**"]
+EXCLUDE = [":(exclude,glob)**/.baton/**", ":(exclude,glob)**/.council/**",
+           ":(exclude,glob).hermes.md", ":(exclude,glob)AGENTS.override.md"]
 # Default info/exclude of the shadow repo, written once when the repo is created (decision D001):
 # data/ and models/ are often code packages (src/models/), so only the top-level ones are
 # excluded; outputs/, logs/ and checkpoints/ are excluded at any depth.
 SHADOW_EXCLUDE_MARK = "# Baton shadow-repo excludes"
 SHADOW_EXCLUDE_DEFAULTS = [
     "**/.baton/runs/", "**/.baton/rollback-backup/", "**/.claude/settings.local.json",
+    ".hermes.md", "AGENTS.override.md",
     ".venv*/", "venv/", "node_modules/", "__pycache__/", "*.pyc", ".DS_Store",
     "/data/", "/models/", "outputs/", "logs/", "checkpoints/",
 ]
@@ -1012,7 +1014,9 @@ def task_dossiers(project, task, st):
 
 
 def prune_closed_task(project, task, dry_run=False):
-    st = project.load_state(task)
+    st = project.read_state(task)
+    if not isinstance(st, dict):
+        return []
     if st.get("status") != "closed":
         return []
     removed = []
@@ -1027,10 +1031,16 @@ def prune_closed_task(project, task, dry_run=False):
 def cmd_gc(project, args):
     project.require_init()
     removed = []
+    skipped_drafts = 0
     for task in project.tasks():
+        if not isinstance(project.read_state(task), dict):
+            skipped_drafts += 1
+            continue
         removed.extend(prune_closed_task(project, task, dry_run=args.dry_run))
     print(f"{'将清理' if args.dry_run else '已清理'} {len(removed)} 份卷宗代码，"
           f"{sum(item['files'] for item in removed)} 个文件，{sum(item['bytes'] for item in removed)} 字节")
+    if skipped_drafts:
+        print(f"跳过 {skipped_drafts} 个 draft 任务（尚未启动）")
 
 
 def _charter_text(project, task, st):
@@ -1579,13 +1589,18 @@ def monitor_backend(cfg):
 def _monitor_hermes_command(project, dossier_id, cfg, effort, prompt):
     """A read-only Hermes call: sandboxed writes, no SOUL/AGENTS rules, file and terminal tools only."""
     mon = cfg.get("monitor") or {}
-    profile = (cfg.get("executor") or {}).get("hermes_profile", "baton-exec-v2")
+    profile = (cfg.get("monitor") or {}).get("hermes_profile", "baton-monitor-v2")
     provider = monitor_provider(cfg)
     if not provider:
         raise ConfigError("monitor.backend=hermes 需要 monitor.provider（例如 deepseek）")
-    profile_dir = hermes_profile_dir(cfg)
+    profile_dir = hermes_profile_dir(cfg, home=hermes_monitor_home(project, cfg), profile=profile)
+    # PROFILE_DIR is the sandbox's mutable root.  For the isolated monitor it
+    # intentionally covers its task-local Hermes home, while PROFILE_SOUL/
+    # PROFILE_CONFIG/PROFILE_ENV retain the profile file paths below.
+    sandbox_write_root = hermes_monitor_home(project, cfg)
     home = os.path.expanduser("~")
-    defines = {"PROFILE_DIR": profile_dir, "TMP_DIR": "/private/tmp", "VAR_TMP_DIR": "/private/var/tmp",
+    defines = {"PROFILE_DIR": sandbox_write_root, "HERMES_HOME": hermes_monitor_home(project, cfg),
+               "TMP_DIR": "/private/tmp", "VAR_TMP_DIR": "/private/var/tmp",
                "TMP_FOLDERS_DIR": "/private/var/folders",
                "CACHE_HOME": os.path.join(home, "Library", "Caches"), "USER_CACHE": os.path.join(home, ".cache"),
                "PROFILE_SOUL": os.path.join(profile_dir, "SOUL.md"),
@@ -1707,9 +1722,12 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
                     "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
         command = _monitor_claude_command(project, dossier_id, cfg, effort, schema_path=schema_path)
     elif monitor_backend(cfg) == "hermes":
+        prepare_monitor_hermes_profile(project, cfg)
         prompt = monitor_prompt_for(cfg, prompt, schema_path)
         command = _monitor_hermes_command(project, dossier_id, cfg, effort, prompt)
         env = _hermes_subprocess_env(cfg)
+        env["HERMES_HOME"] = hermes_monitor_home(project, cfg)
+        env["BATON_PROJECT_ROOT"] = str(project.root)
         prompt = None
         output_path = events_path
     else:
@@ -1775,7 +1793,10 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
     if read_error:
         return None, read_error, attempt, "infrastructure"
     if proc.returncode != 0:
-        if is_capacity_failure(events_path, stderr_path, returncode=proc.returncode):
+        failure_kind = capacity_failure_kind(events_path, stderr_path, returncode=proc.returncode)
+        if failure_kind == "quota":
+            return None, "monitor 额度耗尽", attempt, "quota"
+        if failure_kind == "capacity":
             return None, "monitor 容量不足", attempt, "capacity"
         return None, (stderr or "monitor 进程失败").strip()[-1000:], attempt, "process"
     value, error = _monitor_result_from_files(project, dossier_id, model, output_path, stdout)
@@ -1814,9 +1835,12 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
                     "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
         command = _monitor_claude_command(project, dossier_id, cfg, effort, schema_path=schema_path)
     elif monitor_backend(cfg) == "hermes":
+        prepare_monitor_hermes_profile(project, cfg)
         prompt = monitor_prompt_for(cfg, prompt, schema_path)
         command = _monitor_hermes_command(project, dossier_id, cfg, effort, prompt)
         env = _hermes_subprocess_env(cfg)
+        env["HERMES_HOME"] = hermes_monitor_home(project, cfg)
+        env["BATON_PROJECT_ROOT"] = str(project.root)
         prompt = None
         output_path = events_path
     else:
@@ -1870,7 +1894,10 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
     if read_error:
         return None, read_error, attempt, "infrastructure"
     if proc.returncode != 0:
-        if is_capacity_failure(events_path, stderr_path, returncode=proc.returncode):
+        failure_kind = capacity_failure_kind(events_path, stderr_path, returncode=proc.returncode)
+        if failure_kind == "quota":
+            return None, "轮中检查额度耗尽", attempt, "quota"
+        if failure_kind == "capacity":
             return None, "轮中检查容量不足", attempt, "capacity"
         return None, (stderr or "轮中检查进程失败").strip()[-1000:], attempt, "process"
     if model in CLAUDE_MONITOR_MODELS:
@@ -1895,21 +1922,48 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
 def _set_check_running(state, leg_n, dossier_id, pid, attempt, started):
     leg = next((item for item in state.get("legs", []) if item.get("n") == leg_n), None)
     if leg is not None:
-        leg["monitor_check"] = {"id": dossier_id, "status": "running", "pid": pid,
-                                 "started_at": started, "attempt": attempt}
+        previous = dict(leg.get("monitor_check") or {})
+        runner_pid = previous.get("runner_pid") or os.getpid()
+        marker = previous.get("marker") or f"_monitor_check {state.get('task', '')} {dossier_id}"
+        check = dict(previous)
+        check.update({"id": dossier_id, "status": "running", "pid": runner_pid,
+                      "runner_pid": runner_pid, "started_at": started, "attempt": attempt})
+        check["marker"] = marker
+        leg["monitor_check"] = check
     state["monitor_check_attempt"] = attempt
 
 
-def _check_failure_update(project, task, leg_n, dossier_id, error):
+def _set_check_runner_pid(state, leg_n, dossier_id, pid, marker):
+    """Register the detached runner without clobbering a newer terminal state."""
+    leg = next((item for item in state.get("legs", []) if item.get("n") == leg_n), None)
+    if leg is None:
+        return
+    check = leg.get("monitor_check") or {}
+    if check.get("id") == dossier_id and check.get("status") in {"starting", "running"}:
+        check.update(pid=pid, runner_pid=pid, marker=marker)
+
+
+def _check_failure_update(project, task, leg_n, dossier_id, error, failure_kind=None):
     def update(state):
         leg = next((item for item in state.get("legs", []) if item.get("n") == leg_n), None)
         if leg is None:
             return
         check = dict(leg.get("monitor_check") or {})
+        if check.get("status") in {"completed", "failed"} and check.get("id") == dossier_id:
+            return
         failures = int(leg.get("monitor_check_failures", 0) or 0) + 1
         check.update({"id": dossier_id, "status": "failed", "pid": None, "ended_at": now(), "error": error})
+        if failure_kind:
+            check["failure_kind"] = failure_kind
+        else:
+            check.pop("failure_kind", None)
         leg["monitor_check"] = check
         leg["monitor_check_failures"] = failures
+        supervision = config_for_state(project, state).get("supervision") or {}
+        first = float(supervision.get("first_check_minutes", 10) or 10)
+        interval = first * min(2 ** max(0, failures - 1), 6)
+        leg["check_interval_minutes"] = interval
+        leg["next_check_at"] = now() + interval * 60
         if failures >= 2:
             state["supervision_fallback"] = True
             leg["supervision_fallback"] = True
@@ -1937,6 +1991,10 @@ def run_monitor_check_lifecycle(project, task, dossier_id, cfg, leg_n):
                 if phase and _wait_monitor_check_capacity(project, task, dossier_id, leg_n, delay,
                                                           immediate_used + delayed_used, phase):
                     continue
+            if failure_kind == "quota":
+                _check_failure_update(project, task, leg_n, dossier_id,
+                                      error or "轮中检查额度耗尽", failure_kind="quota")
+                return False
             errors = [error or "轮中检查失败"]
             if failure_kind == "infrastructure":
                 _check_failure_update(project, task, leg_n, dossier_id, error)
@@ -2052,9 +2110,12 @@ def apply_monitor_check_result(project, task, dossier_id, value, leg_n):
 def monitor_check_due(st, leg, now_value=None):
     if not leg or leg.get("status") != "running":
         return False
-    if (leg.get("monitor_check") or {}).get("status") == "running":
+    check = leg.get("monitor_check") or {}
+    if check.get("status") in {"starting", "running"} or isinstance(check.get("capacity_wait"), dict):
         return False
     now_value = now() if now_value is None else float(now_value)
+    if check.get("status") == "failed" and now_value < float(leg.get("next_check_at", float("inf"))):
+        return False
     if leg.get("check_pending"):
         return True
     return now_value >= float(leg.get("next_check_at", float("inf")))
@@ -2066,13 +2127,18 @@ def maybe_start_monitor_check(project, task, st, leg, force=False):
     if not monitor_enabled(cfg) or cfg.get("mode") == "lean" or not leg or leg.get("status") != "running":
         return False
     if force:
+        existing = leg.get("monitor_check") or {}
+        now_value = now()
+        if existing.get("status") == "failed" and now_value < float(leg.get("next_check_at", 0) or 0):
+            project.update_state(task, lambda state: current_leg(state).update(check_pending=True))
+            return False
         first_interval = float((cfg.get("supervision") or {}).get("first_check_minutes", 10))
         project.update_state(task, lambda state: current_leg(state).update(
             check_interval_minutes=first_interval, next_check_at=now() + first_interval * 60))
         st = project.load_state(task)
         leg = current_leg(st)
     check = leg.get("monitor_check") or {}
-    if check.get("status") == "running":
+    if check.get("status") in {"starting", "running"} or isinstance(check.get("capacity_wait"), dict):
         if force or leg.get("check_pending"):
             project.update_state(task, lambda state: current_leg(state).update(check_pending=True))
         return False
@@ -2083,18 +2149,34 @@ def maybe_start_monitor_check(project, task, st, leg, force=False):
     dossier_id = build_check_dossier(project, task, current, current_leg(current))
     if not dossier_id:
         return False
-    project.update_state(task, lambda state: current_leg(state).update(check_pending=False))
-    log_path = os.path.join(dossier_out_dir(project, dossier_id), "check.runner.log")
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    log = open(log_path, "w", encoding="utf-8")
+    project.update_state(task, lambda state: current_leg(state).update(check_pending=False, monitor_check={
+        "id": dossier_id, "status": "starting", "pid": None, "runner_pid": None,
+        "started_at": now(), "marker": f"_monitor_check {task} {dossier_id}"}))
+    log = None
+    runner = None
     try:
+        log_path = os.path.join(dossier_out_dir(project, dossier_id), "check.runner.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        log = open(log_path, "w", encoding="utf-8")
         runner = platform_support.detached_popen([sys.executable, os.path.abspath(__file__), "--root", project.root,
                                    "_monitor_check", task, dossier_id], stdin=subprocess.DEVNULL,
                                   stdout=log, stderr=log, cwd=project.root)
-    finally:
         log.close()
-    project.update_state(task, lambda state: (current_leg(state).setdefault("monitor_check", {}).update(
-        pid=runner.pid, marker=f"_monitor_check {task} {dossier_id}")))
+        log = None
+        project.update_state(task, lambda state: _set_check_runner_pid(
+            state, current_leg(state).get("n"), dossier_id, runner.pid,
+            f"_monitor_check {task} {dossier_id}"))
+    except Exception as exc:
+        if log is not None:
+            log.close()
+        if runner is not None:
+            try:
+                platform_support.terminate_group(runner)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        _check_failure_update(project, task, current_leg(project.load_state(task)).get("n"), dossier_id,
+                              f"轮中检查启动失败：{exc}")
+        return False
     _DETACHED_RUNNERS.append(runner)
     return True
 
@@ -2235,15 +2317,45 @@ def _wait_monitor_check_capacity(project, task, dossier_id, leg_n, delay, retry_
 
 
 def _monitor_capacity_error(text):
+    reset = _quota_reset_text()
+    return f"{text}；额度重置时间：{reset}" if reset else text
+
+
+def _format_quota_reset(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return stamp(float(value), fmt="%m-%d %H:%M")
+        except (OverflowError, OSError, ValueError):
+            pass
+    return ""
+
+
+def _quota_reset_text():
     try:
         quota = safe_quota(block=False)
     except Exception:  # quota reporting must not hide the monitor failure
-        quota = None
+        return ""
     if isinstance(quota, dict):
+        windows = [window for window in (quota.get("windows") or [])
+                   if isinstance(window, dict) and window.get("resets_at") is not None]
+        if windows:
+            def remaining(window):
+                value = window.get("remaining")
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return float("inf")
+            selected = min(windows, key=remaining)
+            formatted = _format_quota_reset(selected.get("resets_at"))
+            if formatted:
+                return formatted
         reset = quota.get("reset_at") or quota.get("reset_time") or quota.get("resets_at")
-        if reset:
-            return f"{text}；额度重置时间：{reset}"
-    return text
+        formatted = _format_quota_reset(reset)
+        if formatted:
+            return formatted
+    return ""
 
 
 def run_monitor_lifecycle(project, task, dossier_id, dossier_kind, cfg, leg_n, original_status):
@@ -2258,14 +2370,16 @@ def run_monitor_lifecycle(project, task, dossier_id, dossier_kind, cfg, leg_n, o
         prompt = base_prompt if schema_attempt == 0 else base_prompt + "\n\n---\n\n# 上次输出的校验错误（由 baton 添加）\n" + "\n".join(errors)
         capacity_error = None
         terminal_error = None
+        terminal_kind = None
         while True:
             good, integrity_error = verify_dossier(project, dossier_id, require_code=True)
             if not good:
                 _monitor_state_update(project, task, dossier_id, leg_n, "failed", error=integrity_error)
                 return False
             brief, error, attempt, failure_kind = run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n)
-            if brief is None and failure_kind in ("timeout", "process", "infrastructure"):
+            if brief is None and failure_kind in ("timeout", "process", "infrastructure", "quota"):
                 terminal_error = error or "monitor 进程失败"
+                terminal_kind = failure_kind
                 break
             if brief is None and failure_kind == "capacity":
                 phase, delay, immediate_used, delayed_used = next_capacity_retry(
@@ -2280,9 +2394,13 @@ def run_monitor_lifecycle(project, task, dossier_id, dossier_kind, cfg, leg_n, o
             break
         if capacity_error:
             errors = [_monitor_capacity_error(capacity_error)]
+            _monitor_state_update(project, task, dossier_id, leg_n, "failed", error="；".join(errors),
+                                  failure_kind="capacity")
             break
         if terminal_error:
-            errors = [terminal_error]
+            errors = [_monitor_capacity_error(terminal_error) if terminal_kind == "quota" else terminal_error]
+            extra = {"failure_kind": terminal_kind} if terminal_kind == "quota" else {}
+            _monitor_state_update(project, task, dossier_id, leg_n, "failed", error="；".join(errors), **extra)
             break
         if brief is not None:
             good, integrity_error = verify_dossier(project, dossier_id, require_code=True)
@@ -2797,6 +2915,8 @@ def _effective_executor_config(cfg, decision):
 
 
 def _rule_conclusion_hint(task, conclusion, dossier_id, leg):
+    if conclusion == "ACCEPT":
+        return f"下一步：baton close {task}"
     if conclusion == "ROLLBACK":
         return "ROLLBACK：先向用户说明原因和回滚点；用户同意后运行 baton rollback，若不同意则用 --rerule 改成 REVISE。"
     if conclusion == "ADOPT":
@@ -2808,6 +2928,17 @@ def _rule_conclusion_hint(task, conclusion, dossier_id, leg):
     if conclusion == "ASK_USER":
         return "ASK_USER：resume 已拦截，等用户决定后用 baton rule --rerule 改成 REVERT 或 ADOPT。"
     return f"下一步：baton resume {task} --verdict {dossier_id}"
+
+
+def _latest_final_accept(project, task):
+    dossiers = _final_dossiers(project, task)
+    if not dossiers:
+        return None, None
+    dossier_id = dossiers[-1]
+    verdict = _latest_ledger_record(ledger_records(project), "verdict", task, dossier=dossier_id)
+    if verdict and str(verdict.get("conclusion", "")).upper() == "ACCEPT":
+        return dossier_id, verdict
+    return None, None
 
 
 def cmd_rule(project, args):
@@ -3272,6 +3403,37 @@ def find_project_dir(start, legacy=True):
     return start
 
 
+def resolve_cli_project_root(start, command, explicit_root=None):
+    """Resolve a command's project root while keeping new work local.
+
+    Existing inspection and task-management commands retain the historical
+    upward lookup.  ``new`` and ``start`` are the two commands that create a
+    new execution context, so an implicit ancestor project is ambiguous and
+    must be rejected; the caller can use ``--root`` when that ancestor is
+    intentional.
+    """
+    if explicit_root:
+        return canonical_dir(explicit_root)
+    current = canonical_dir(start)
+    if command == "init":
+        return current
+    if command in {"new", "start"}:
+        ancestor = current
+        probe = current
+        while True:
+            if is_project_dir(probe, legacy=True):
+                ancestor = probe
+                break
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                break
+            probe = parent
+        if ancestor != current and is_project_dir(ancestor, legacy=True):
+            die("当前目录没有 baton.json，但向上找到了项目根 %s；请先在当前目录运行 baton init，或显式传 --root <dir>" % ancestor)
+        return current
+    return find_project_dir(current, legacy=command != "init")
+
+
 def task_has_v1_refs(st):
     """True when Baton v1 stored checkpoints of this task in the user's repository."""
     if st.get("snapshot_store") == "shadow":
@@ -3659,15 +3821,16 @@ def refresh_runner_liveness(project, task, st):
             st = project.update_state(task, curation_failed)
         else:
             return st
-    if check.get("status") == "running":
-        check_pid = check.get("pid")
+    if check.get("status") in {"starting", "running"}:
+        check_pid = check.get("runner_pid") or check.get("pid")
         marker = check.get("marker") or f"_monitor_check {task} {check.get('id', '')}"
-        if check_pid and not pid_alive(check_pid, marker):
+        alive = bool(check_pid and pid_alive(check_pid, marker))
+        if not alive:
             try:
                 young = now() - float(check.get("started_at", now())) < STARTUP_GRACE_SECONDS
             except (TypeError, ValueError):
                 young = False
-            if not (young and pid_alive(check_pid)):
+            if not young:
                 _check_failure_update(project, task, leg.get("n"), check.get("id"), "轮中检查进程意外退出")
                 st = project.load_state(task)
                 leg = current_leg(st)
@@ -3693,13 +3856,17 @@ def refresh_runner_liveness(project, task, st):
         return st
     if leg.get("status") != "running":
         return st
-    if not leg.get("runner_pid") and now() - leg["started_at"] < STARTUP_GRACE_SECONDS:
+    try:
+        leg_started_at = float(leg.get("started_at", now()))
+    except (TypeError, ValueError):
+        leg_started_at = now()
+    if not leg.get("runner_pid") and now() - leg_started_at < STARTUP_GRACE_SECONDS:
         return st  # launch_leg has not recorded the runner pid yet
     if pid_alive(leg.get("runner_pid"), runner_marker(task, leg["n"])):
         return st
     # Popen records the pid before the detached child has completed exec.  During
     # that short window its command line does not contain the marker yet.
-    if leg.get("runner_pid") and now() - leg["started_at"] < STARTUP_GRACE_SECONDS \
+    if leg.get("runner_pid") and now() - leg_started_at < STARTUP_GRACE_SECONDS \
             and pid_alive(leg.get("runner_pid")):
         return st
     # A runner writes its result file just before the final state update.  A conductor
@@ -4500,9 +4667,6 @@ def _capacity_event(ev):
     et = ev.get("type")
     if et in ("error", "turn.failed"):
         return _capacity_message(ev.get("error") or ev)
-    item = ev.get("item")
-    if et == "item.completed" and isinstance(item, dict) and item.get("type") == "error":
-        return _capacity_message(item)
     return ""
 
 
@@ -4514,13 +4678,57 @@ def is_capacity_failure(events_path, stderr_path, event_offset=0, stderr_offset=
     deliberately restricted to the newly appended error/turn.failed events and stderr,
     so a capacity message from an earlier retry cannot trigger another retry.
     """
-    if returncode == 0 and valid_executor_result(result):
+    kind = capacity_failure_kind(events_path, stderr_path, event_offset, stderr_offset,
+                                 returncode, result)
+    if kind == "capacity":
+        return True
+    if kind is not None:
         return False
+    # Keep the historical helper compatible with Hermes' one-line provider
+    # diagnostic.  Runner paths use capacity_failure_kind directly; prose in
+    # a non-JSON Hermes response is never accepted here.
     events, _ = read_events(events_path, event_offset)
-    messages = [_capacity_event(ev) for ev in events]
-    stdout = read_bytes_since(events_path, event_offset) or ""
+    raw = read_bytes_since(events_path, event_offset) or ""
+    return not events and raw.strip().lower() == "selected model is at capacity"
+
+
+_QUOTA_FAILURE_RE = re.compile(
+    r"(?:you(?:['’]?ve|\s+have)\s+hit\s+your\s+usage\s+limit|"
+    r"usage\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded)|"
+    r"(?:usage|quota)\s+(?:has\s+been\s+)?(?:exhausted|depleted|exceeded))", re.I)
+
+
+def capacity_failure_kind(events_path, stderr_path, event_offset=0, stderr_offset=0,
+                          returncode=0, result=None):
+    """Classify one failed model call as capacity, quota, or a normal failure.
+
+    Agent messages and command output are intentionally ignored: they are evidence
+    of what the model did, not diagnostics for why the model call failed.
+    """
+    if returncode == 0 and valid_executor_result(result):
+        return None
+    events, _ = read_events(events_path, event_offset)
+    messages = [message for message in (_capacity_event(ev) for ev in events) if message]
     stderr = read_bytes_since(stderr_path, stderr_offset) or ""
-    return any("at capacity" in message.lower() for message in messages + [stdout, stderr])
+    event_text = "\n".join(messages).lower()
+    if event_text:
+        if _QUOTA_FAILURE_RE.search(event_text):
+            return "quota"
+        if "at capacity" in event_text:
+            return "capacity"
+    # Hermes can emit a plain diagnostic instead of JSONL.  Only a diagnostic
+    # line prefixed with Error: is eligible; agent prose is evidence, not an
+    # explanation of why the call failed.
+    raw_events = read_bytes_since(events_path, event_offset) or ""
+    diagnostics = "\n".join(line.strip() for line in raw_events.splitlines() if "Error:" in line)
+    if not events and "selected model is at capacity" in diagnostics.lower():
+        return "capacity"
+    stderr_text = stderr.lower()
+    if _QUOTA_FAILURE_RE.search(stderr_text):
+        return "quota"
+    if "at capacity" in stderr_text:
+        return "capacity"
+    return None
 
 
 def capacity_retry_config(cfg):
@@ -4651,7 +4859,7 @@ def _walk_code_files(project):
                     and not _shadow_prune_dir(n, rel_dir)]
         for name in files:
             # Bytecode is regenerated by every test run; it is never acceptance material.
-            if name.endswith((".pyc", ".pyo")):
+            if name.endswith((".pyc", ".pyo")) or name in (".hermes.md", "AGENTS.override.md"):
                 continue
             full = os.path.join(directory, name)
             if os.path.islink(full) or not os.path.isfile(full):
@@ -4808,8 +5016,16 @@ def _is_config_candidate(path):
 
 def _acceptance_new_allowed(path, acceptance):
     import fnmatch
-    for pattern in acceptance or []:
+    for raw_pattern in acceptance or []:
+        pattern = _scope_entry_path(raw_pattern)
         prefix = pattern.rstrip("/")
+        if any(c in prefix for c in "*?["):
+            if fnmatch.fnmatch(path, prefix):
+                name = os.path.basename(path)
+                if (fnmatch.fnmatch(name, "test_*.py") or fnmatch.fnmatch(name, "*_test.py")
+                        or fnmatch.fnmatch(name, "*.spec.*") or fnmatch.fnmatch(name, "*.test.*")):
+                    return True
+            continue
         if path == prefix or path.startswith(prefix + "/"):
             name = os.path.basename(path)
             if (fnmatch.fnmatch(name, "test_*.py") or fnmatch.fnmatch(name, "*_test.py")
@@ -4832,7 +5048,7 @@ def _test_command_paths(project, command, all_files=None):
             continue
         if token in ("python", "python3", "pytest", "py.test", "unittest", "discover", "-m"):
             continue
-        rel = token.replace("\\", "/")
+        rel = _scope_entry_path(token.replace("\\", "/"))
         full = os.path.join(project.root, rel)
         if os.path.exists(full) or any(c in rel for c in "*?["):
             paths.append(rel)
@@ -4871,7 +5087,8 @@ def _monitor_parts(path, root):
 
 def _freeze_manifest(project, scope, cfg):
     all_files = list(_walk_code_files(project))
-    frozen = set(_glob_paths(project, scope.get("acceptance", []), all_files))
+    acceptance_paths = [_scope_entry_path(entry) for entry in scope.get("acceptance", [])]
+    frozen = set(_glob_paths(project, acceptance_paths, all_files))
     frozen.update(_glob_paths(project, scope.get("frozen", []), all_files))
     configured = ((cfg.get("freeze") or {}).get("paths") or [])
     if not isinstance(configured, list) or any(not isinstance(x, str) for x in configured):
@@ -4983,7 +5200,9 @@ def check_freeze(project, task, st=None):
         if _is_config_candidate(path) and not _acceptance_new_allowed(path, acceptance):
             violations.append({"path": path, "type": "新建", "rule": "测试/上下文配置"})
     # An explicitly frozen path that was absent at start is still protected against creation.
-    patterns = list(st.get("scope", {}).get("frozen", []) or []) + list(manifest.get("configured", []) or [])
+    patterns = [_scope_entry_path(pattern) for pattern in
+                (list(st.get("scope", {}).get("frozen", []) or [])
+                 + list(manifest.get("configured", []) or []))]
     import fnmatch
     for path in sorted(current):
         if path in entries:
@@ -5594,7 +5813,7 @@ def cmd_preset(project, args):
     for task in args.task or []:
         check_task(task)
         st = project.read_state(task)
-        if st is None:
+        if st is None or (not st.get("legs") and not st.get("config_snapshot")):
             print(f"任务 {task} 还没启动，启动时会按新的 baton.json 生成配置快照")
             continue
         leg = current_leg(st)
@@ -5710,6 +5929,7 @@ def cmd_amend(project, args):
             "approver": approver,
         }]
     project.update_state(args.task, lambda state: state.update(state_update))
+    os.makedirs(freeze_dir(project, args.task), exist_ok=True)
     write_json(os.path.join(freeze_dir(project, args.task), "manifest.json"), manifest)
     print(f"已登记修正案/配置修正；标准在第 {len(st.get('legs', []))} 轮后改过。")
     if amendment_path:
@@ -5744,7 +5964,7 @@ def protocol_text(project, task):
     })
 
 
-def codex_command(project, kind, thread_id, last_path, cfg=None):
+def codex_command(project, kind, thread_id, last_path, cfg=None, workspace_root=None, isolated=False):
     ex = (cfg or project.config)["executor"]
     cmd = [platform_support.executable("codex"), "exec"] + (["resume"] if kind == "resume" else [])
     cmd += ["--json", "-m", ex["model"],
@@ -5761,23 +5981,34 @@ def codex_command(project, kind, thread_id, last_path, cfg=None):
         cmd += ["--disable", "fast_mode"]
     for kv in ex.get("extra_config") or []:
         cmd += ["-c", kv]
+    if isolated:
+        # Codex otherwise walks to the enclosing git root and can import a vault's
+        # AGENTS.md.  baton.json is the project boundary for this task.
+        cmd += ["-c", 'project_root_markers=["baton.json"]']
     if not is_git(project.root):
         cmd += ["--skip-git-repo-check"]
+    workspace_root = workspace_root or project.root
     if kind == "start":
-        cmd += ["-C", project.root, "-"]
+        cmd += ["-C", workspace_root, "-"]
     else:
+        # ``codex exec resume`` has no -C flag in the installed CLI; its
+        # subprocess cwd is set by cmd_run/launch_leg instead.
         cmd += [thread_id, "-"]
     return cmd
 
 
-def hermes_sandbox_defines(project, cfg):
+def hermes_sandbox_defines(project, cfg, workspace_root=None, task=None):
     """Seatbelt -D values.  Keep every path explicit so the rule is reusable."""
-    profile = hermes_profile_dir(cfg)
+    profile = hermes_profile_dir(cfg, project=project, task=task)
+    sandbox_write_root = (hermes_task_home(project, task, cfg)
+                          if task is not None else profile)
     home = os.path.expanduser("~")
     baton_home = os.path.dirname(os.path.dirname(project.state_dir))
     values = {
-        "PROJECT": project.root,
-        "PROFILE_DIR": profile,
+        "PROJECT": workspace_root or project.root,
+        "PROFILE_DIR": sandbox_write_root,
+        "HERMES_HOME": (hermes_task_home(project, task, cfg)
+                        if task is not None else hermes_home(cfg)),
         "TMP_DIR": "/private/tmp",
         "VAR_TMP_DIR": "/private/var/tmp",
         "TMP_FOLDERS_DIR": "/private/var/folders",
@@ -5794,7 +6025,7 @@ def hermes_sandbox_defines(project, cfg):
     return {key: canonical_dir(value) for key, value in values.items()}
 
 
-def hermes_command(project, kind, thread_id, prompt, cfg=None):
+def hermes_command(project, kind, thread_id, prompt, cfg=None, task=None, workspace_root=None):
     """Build the exact Hermes invocation used by one executor leg."""
     cfg = cfg or project.config
     ex = cfg["executor"]
@@ -5802,7 +6033,7 @@ def hermes_command(project, kind, thread_id, prompt, cfg=None):
     args = []
     if ex.get("sandbox_exec", True):
         args += ["sandbox-exec", "-f", os.path.join(TEMPLATES, "hermes-sandbox.sb")]
-        for key, value in hermes_sandbox_defines(project, cfg).items():
+        for key, value in hermes_sandbox_defines(project, cfg, workspace_root=workspace_root, task=task).items():
             args += ["-D", f"{key}={value}"]
     args += [hermes_executable(cfg), "-p", profile, "chat"]
     if kind == "resume":
@@ -5823,6 +6054,10 @@ def hermes_command(project, kind, thread_id, prompt, cfg=None):
 def hermes_executor_env(project, task, leg_n, started_at, cfg, st=None):
     st = st or {}
     env = _hermes_subprocess_env(cfg)
+    env["BATON_PROJECT_ROOT"] = str(project.root)
+    env["TERMINAL_CWD"] = str(canonical_dir(st.get("launch_root") or project.root))
+    if st.get("hermes_home"):
+        env["HERMES_HOME"] = st["hermes_home"]
     env.update({"MEM0_TELEMETRY": "false", "BATON_HOME": memory_baton_home(cfg),
                 "BATON_TASK": str(task), "BATON_LEG": str(leg_n),
                 "BATON_LEG_STARTED": str(started_at),
@@ -5904,7 +6139,8 @@ def memory_prompt_for_leg(project, task, prompt, st=None, cfg=None):
                "previous_ids": [str(item) for leg in (st or {}).get("legs", []) for item in (leg.get("memory_pushed") or [])],
                "memory": cfg.get("memory", {})}
     env = os.environ.copy()
-    env.update({"BATON_HOME": memory_baton_home(cfg), "MEM0_TELEMETRY": "false"})
+    env.update({"BATON_HOME": memory_baton_home(cfg), "BATON_PROJECT_ROOT": str(project.root),
+                "MEM0_TELEMETRY": "false"})
     try:
         result = subprocess.run([python, "-m", "baton_memory.prompt"], cwd=project.root, env=env,
                                 input=json.dumps(payload, ensure_ascii=False), capture_output=True,
@@ -6026,6 +6262,7 @@ def memory_mcp_preflight(project, task, leg_n, cfg, timeout=5.0):
         return False, "本轮没有记忆工具（venv 不存在）"
     env = os.environ.copy()
     env.update({"MEM0_TELEMETRY": "false", "BATON_HOME": memory_baton_home(cfg),
+                "BATON_PROJECT_ROOT": str(project.root),
                 "BATON_TASK": str(task), "BATON_LEG": str(leg_n),
                 "BATON_LEG_STARTED": str(now()), "BATON_MCP_PREFLIGHT": "1"})
     proc = subprocess.Popen([python, "-m", "baton_memory.server"], cwd=project.root,
@@ -6295,6 +6532,366 @@ def statusline_report(project):
 
 # ---------------------------------------------------------------- commands
 
+HARNESS_PENDING_MARKER = "<!-- BATON_HARNESS_REVIEW_REQUIRED（待审：conductor 审改后删除本行，才能 baton start） -->"
+HARNESS_LENGTH_WARNING = "<!-- BATON HARNESS WARNING: 长度超过 4000 字，请 conductor 压缩后再启动 -->"
+
+
+def harness_path(project, task):
+    return os.path.join(project.task_dir(task), "harness.md")
+
+
+def _harness_instruction_sources(project):
+    """Collect project instruction files in the order a backend sees them."""
+    root = git_repo_top(project.root) or project.root
+    target = canonical_dir(project.root)
+    directories = []
+    current = canonical_dir(target)
+    while True:
+        directories.append(current)
+        if current == canonical_dir(root) or not current.startswith(canonical_dir(root) + os.sep):
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    directories.reverse()
+    paths = []
+    for directory in directories:
+        for name in (".hermes.md", "HERMES.md", "AGENTS.md", "agents.md", "CLAUDE.md", ".cursorrules"):
+            path = _instruction_candidate(directory, name)
+            if not path:
+                continue
+            same_existing = any(os.path.exists(existing) and os.path.exists(path) and os.path.samefile(existing, path)
+                                for existing in paths)
+            if path not in paths and not same_existing:
+                paths.append(path)
+    user = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+    if os.path.isfile(user) and user not in paths:
+        paths.append(user)
+    return paths
+
+
+def _harness_pinned_memory(project):
+    try:
+        from baton_memory.ledger import MemoryLedger
+        ledger = MemoryLedger(project)
+        latest = ledger.latest()
+        values = [item for item in latest.values()
+                  if isinstance(item, dict) and item.get("status", "active") == "active" and item.get("pinned")]
+        values.sort(key=lambda item: int(item.get("pin_seq", item.get("seq", 0)) or 0))
+        return values, ""
+    except Exception as exc:  # noqa: BLE001 — draft must explain unavailable pinned memory
+        return [], "记忆台账 pinned 条目读取失败（%s）：%s" % (getattr(locals().get("ledger", None), "ledger_path", project.state_dir), exc)
+
+
+def build_harness_draft(project, task, cfg=None):
+    """Create the backend-neutral, conductor-reviewed task context."""
+    cfg = cfg or project.config
+    lines = [HARNESS_PENDING_MARKER,
+             "# Baton harness",
+             "",
+             "> 这是项目长期事实的上下文草稿。conductor 审定后删除顶部待审标记；删除只对 conductor 有效的流程指令（例如“写代码走 Baton、主会话不改代码”），不要把本任务简报复制进来。",
+             "",
+             "## 项目约定", ""]
+    sources = _harness_instruction_sources(project)
+    if sources:
+        for path in sources:
+            lines.extend([f"### 来源：{os.path.relpath(path, project.root) if path.startswith(project.root + os.sep) else path}", "",
+                          read_text(path).rstrip(), ""])
+    else:
+        lines.append("（未发现项目级指令文件。）\n")
+    lines.extend(["## 常用命令", "",
+                  f"- 验证命令：`{(cfg.get('supervision') or {}).get('test_command') or '按任务简报中的验证方式'}`", "",
+                  "## 相关文件", "",
+                  "- 项目根：`%s`" % project.root,
+                  "- 任务简报：`.baton/tasks/%s/brief.md`" % task, "",
+                  "## 已知坑", "",
+                  "- 这里只记录项目长期事实；本任务目标、范围、冻结文件和验收标准以 brief.md 为准。",
+                  "- 不要写入 conductor 流程指令、用户个人文风规则，或与本任务简报冲突的旧约定。", ""])
+    pinned, pinned_error = _harness_pinned_memory(project)
+    if pinned:
+        lines.extend(["## 记忆台账中的 pinned 条目", ""])
+        for item in pinned:
+            lines.append("- [%s] %s" % (item.get("ledger_id", "?"), item.get("text", "")))
+        lines.append("")
+    elif pinned_error:
+        lines.extend(["## 记忆台账中的 pinned 条目", "", "- " + pinned_error, ""])
+    text = "\n".join(lines).rstrip() + "\n"
+    if len(text) > 4000:
+        text = text.rstrip() + "\n\n" + HARNESS_LENGTH_WARNING + "\n"
+    return text
+
+
+def harness_is_approved(project, task, st=None):
+    """Require a current, recorded approval for the exact harness bytes."""
+    path = harness_path(project, task)
+    if not os.path.isfile(path):
+        return False
+    text = read_text(path)
+    if not text.strip() or HARNESS_PENDING_MARKER in text:
+        return False
+    st = st if isinstance(st, dict) else (project.read_state(task, {}) or {})
+    approval = st.get("harness_approval")
+    expected = approval.get("sha256") if isinstance(approval, dict) else None
+    current = _sha256_file(path)
+    return bool(expected and current and expected == current)
+
+
+def cmd_harness_approve(project, args):
+    """Approve a task harness and record the reviewed content immutably."""
+    project.require_init()
+    check_task(args.task)
+    path = harness_path(project, args.task)
+    if not os.path.isfile(path):
+        die(f"找不到 harness.md：{path}")
+    text = read_text(path)
+    if not text.strip():
+        die(f"harness.md 不能为空：{path}")
+    approved = text.replace(HARNESS_PENDING_MARKER, "")
+    if not approved.strip():
+        die(f"harness.md 去掉待审标记后不能为空：{path}")
+    if approved != text:
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write(approved)
+    digest = hashlib.sha256(approved.encode("utf-8")).hexdigest()
+    approved_at = stamp()
+    record = append_ledger(project, {
+        "type": "harness_approval",
+        "task": args.task,
+        "harness_path": path,
+        "harness_sha256": digest,
+        "approved_at": approved_at,
+    })
+    project.update_state(args.task, lambda state: state.update(
+        harness_required=True,
+        harness_approved_at=approved_at,
+        harness_sha256=digest,
+        harness_approval={"approved_at": approved_at, "sha256": digest,
+                          "ledger_seq": record["seq"]},
+    ))
+    print(f"已审定 harness.md（sha256 {digest}，{approved_at}）")
+
+
+def _git_info_exclude_path(project, root=None):
+    try:
+        top = git_repo_top(root or project.root)
+    except Exception:
+        return None
+    if not top:
+        return None
+    return os.path.join(top, ".git", "info", "exclude")
+
+
+def _ensure_generated_hermes_exclude(project, filename=".hermes.md", root=None):
+    path = _git_info_exclude_path(project, root=root)
+    if not path:
+        return False
+    try:
+        text = read_text(path) if os.path.exists(path) else ""
+        if filename in text.splitlines():
+            return False
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as stream:
+            if text and not text.endswith("\n"):
+                stream.write("\n")
+            stream.write(filename + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def _ensure_shadow_generated_exclude(project, filename):
+    """Keep generated native context out of the private snapshot repo."""
+    gd = project.snap_git_dir
+    exclude = os.path.join(gd, "info", "exclude")
+    if not os.path.isfile(os.path.join(gd, "HEAD")) or not os.path.isfile(exclude):
+        return False
+    lines = read_text(exclude).splitlines()
+    if filename in lines:
+        return False
+    with open(exclude, "a", encoding="utf-8") as stream:
+        if lines:
+            stream.write("\n")
+        stream.write(filename + "\n")
+    return True
+
+
+def render_task_hermes_context(project, task, st, workspace_root=None):
+    """Render the approved harness as the cwd-local Hermes context file."""
+    if not harness_is_approved(project, task):
+        raise ConfigError("未审定 harness.md，拒绝生成 .hermes.md")
+    workspace_root = canonical_dir(workspace_root or st.get("launch_root") or project.root)
+    path = os.path.join(workspace_root, ".hermes.md")
+    task_dir = project.task_dir(task)
+    backup_dir = os.path.join(task_dir, "hermes-context-backup")
+    backups = []
+    for name in (".hermes.md", "HERMES.md"):
+        user_path = os.path.join(workspace_root, name)
+        if os.path.isfile(user_path) and os.path.realpath(user_path) != os.path.realpath(path):
+            os.makedirs(backup_dir, exist_ok=True)
+            backup = os.path.join(backup_dir, name.replace("/", "_"))
+            if not os.path.exists(backup):
+                shutil.copy2(user_path, backup)
+            os.remove(user_path)
+            backups.append({"path": user_path, "backup": backup})
+    generated = not os.path.exists(path)
+    if os.path.exists(path) and not (st or {}).get("hermes_context_generated"):
+        os.makedirs(backup_dir, exist_ok=True)
+        backup = os.path.join(backup_dir, ".hermes.md")
+        if not os.path.exists(backup):
+            shutil.copy2(path, backup)
+        backups.append({"path": path, "backup": backup})
+    with open(path, "w", encoding="utf-8") as stream:
+        stream.write(read_text(harness_path(project, task)))
+    added_exclude = _ensure_generated_hermes_exclude(project, root=workspace_root)
+    _ensure_shadow_generated_exclude(project, ".hermes.md")
+    def update(state):
+        state["hermes_context_generated"] = True
+        state["hermes_context_path"] = path
+        state["hermes_context_backups"] = backups
+        state["hermes_context_exclude_added"] = bool(added_exclude)
+    project.update_state(task, update)
+    return path
+
+
+def restore_task_hermes_context(project, task, st=None):
+    st = st or project.read_state(task, {}) or {}
+    path = (st.get("hermes_context_path") or os.path.join(project.root, ".hermes.md"))
+    if st.get("hermes_context_generated") and os.path.lexists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    for item in st.get("hermes_context_backups") or []:
+        target, backup = item.get("path"), item.get("backup")
+        if target and backup and os.path.exists(backup) and not os.path.lexists(target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.move(backup, target)
+    if st.get("hermes_context_exclude_added"):
+        exclude = _git_info_exclude_path(project, root=os.path.dirname(path))
+        if exclude and os.path.isfile(exclude):
+            lines = read_text(exclude).splitlines()
+            with open(exclude, "w", encoding="utf-8") as stream:
+                stream.write("\n".join(line for line in lines if line != ".hermes.md") + ("\n" if lines else ""))
+
+
+def codex_task_home(project, task):
+    return canonical_dir(os.path.join(project.state_dir, "tasks", str(task), "codex"))
+
+
+def executor_isolation_enabled(st):
+    """Only tasks that recorded a task-local home use isolated context files."""
+    return bool(isinstance(st, dict) and (st.get("codex_home") or st.get("hermes_home")))
+
+
+def _codex_home_source():
+    raw = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def prepare_task_codex_home(project, task, target=None):
+    """Create a task CODEX_HOME, inheriting regular config files but no AGENTS rules."""
+    target = os.path.abspath(target or codex_task_home(project, task))
+    source = _codex_home_source()
+    os.makedirs(target, exist_ok=True)
+    excluded = {"AGENTS.md", "AGENTS.override.md"}
+    inherited = []
+    for name in excluded:
+        stale = os.path.join(target, name)
+        if os.path.lexists(stale):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    if os.path.isdir(source) and os.path.realpath(source) != os.path.realpath(target):
+        for name in sorted(os.listdir(source)):
+            if name in excluded:
+                continue
+            src = os.path.join(source, name)
+            dst = os.path.join(target, name)
+            if name == "skills" and os.path.isdir(src) and not os.path.lexists(dst):
+                try:
+                    os.symlink(src, dst)
+                    inherited.append(name)
+                except OSError:
+                    pass
+                continue
+            if not os.path.isfile(src) or os.path.lexists(dst):
+                continue
+            try:
+                os.symlink(src, dst)
+                inherited.append(name)
+            except OSError:
+                shutil.copy2(src, dst)
+                inherited.append(name)
+    return target, inherited, sorted(excluded)
+
+
+def codex_executor_env(project, task, st=None):
+    """Use a recorded task-local CODEX_HOME; legacy tasks retain global behavior."""
+    env = os.environ.copy()
+    st = st or {}
+    env["BATON_PROJECT_ROOT"] = str(project.root)
+    env["TERMINAL_CWD"] = str(canonical_dir(st.get("launch_root") or project.root))
+    home = st.get("codex_home")
+    if not home:
+        return env
+    prepare_task_codex_home(project, task, target=home)
+    env["CODEX_HOME"] = home
+    return env
+
+
+def prepare_task_codex_context(project, task, st=None, workspace_root=None):
+    """Render the approved harness as Codex's native project document."""
+    if not harness_is_approved(project, task):
+        raise ConfigError("未审定 harness.md，拒绝生成 AGENTS.override.md")
+    st = st or {}
+    workspace_root = canonical_dir(workspace_root or st.get("launch_root") or project.root)
+    path = os.path.join(workspace_root, "AGENTS.override.md")
+    home = st.get("codex_home") or codex_task_home(project, task)
+    _, inherited, excluded = prepare_task_codex_home(project, task, target=home)
+    task_dir = project.task_dir(task)
+    backup_dir = os.path.join(task_dir, "codex-context-backup")
+    backups = []
+    if os.path.isfile(path) and not (st or {}).get("codex_context_generated"):
+        os.makedirs(backup_dir, exist_ok=True)
+        backup = os.path.join(backup_dir, "AGENTS.override.md")
+        shutil.copy2(path, backup)
+        backups.append({"path": path, "backup": backup})
+    with open(path, "w", encoding="utf-8") as stream:
+        stream.write(read_text(harness_path(project, task)))
+    added_exclude = _ensure_generated_hermes_exclude(project, "AGENTS.override.md", root=workspace_root)
+    _ensure_shadow_generated_exclude(project, "AGENTS.override.md")
+    def update(state):
+        state["codex_context_generated"] = True
+        state["codex_context_path"] = path
+        state["codex_context_backups"] = backups
+        state["codex_context_exclude_added"] = bool(added_exclude)
+        state["codex_home_inherited"] = inherited
+        state["codex_home_excluded"] = excluded
+    project.update_state(task, update)
+    return path
+
+
+def restore_task_codex_context(project, task, st=None):
+    st = st or project.read_state(task, {}) or {}
+    path = st.get("codex_context_path") or os.path.join(project.root, "AGENTS.override.md")
+    if st.get("codex_context_generated") and os.path.lexists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    for item in st.get("codex_context_backups") or []:
+        target, backup = item.get("path"), item.get("backup")
+        if target and backup and os.path.exists(backup) and not os.path.lexists(target):
+            shutil.move(backup, target)
+    if st.get("codex_context_exclude_added"):
+        exclude = _git_info_exclude_path(project, root=os.path.dirname(path))
+        if exclude and os.path.isfile(exclude):
+            lines = read_text(exclude).splitlines()
+            with open(exclude, "w", encoding="utf-8") as stream:
+                stream.write("\n".join(line for line in lines if line != "AGENTS.override.md") + ("\n" if lines else ""))
+
 def write_baton_gitignore(project):
     gi = project.p(".gitignore")
     have = read_text(gi).splitlines() if os.path.exists(gi) else None
@@ -6355,9 +6952,44 @@ def hermes_home(cfg=None):
         os.environ.get("HERMES_HOME") or executor.get("hermes_home") or "~/.hermes"))
 
 
-def hermes_profile_dir(cfg):
-    profile = ((cfg.get("executor") or {}).get("hermes_profile") or "baton-exec-v2")
-    return os.path.join(hermes_home(cfg), "profiles", profile)
+def hermes_task_home(project, task, cfg=None):
+    """Hermes HOME isolated to one Baton task."""
+    return canonical_dir(os.path.join(project.state_dir, "tasks", str(task), "hermes"))
+
+
+def hermes_monitor_home(project, cfg=None):
+    """Hermes HOME reserved for read-only monitor calls."""
+    return os.path.join(project.state_dir, "monitor", "hermes")
+
+
+def prepare_monitor_hermes_profile(project, cfg):
+    """Provision the monitor's separate read-only Hermes profile."""
+    home = hermes_monitor_home(project, cfg)
+    profile = hermes_profile_dir(cfg, home=home,
+                                 profile=(cfg.get("monitor") or {}).get("hermes_profile", "baton-monitor-v2"))
+    os.makedirs(profile, exist_ok=True)
+    soul = os.path.join(profile, "SOUL.md")
+    config = os.path.join(profile, "config.yaml")
+    if not os.path.exists(soul):
+        with open(soul, "w", encoding="utf-8") as stream:
+            stream.write(hermes_soul_text())
+    if not os.path.exists(config):
+        with open(config, "w", encoding="utf-8") as stream:
+            stream.write(hermes_config_text(cfg, project=project))
+    marker = os.path.join(home, ".no-bundled-skills")
+    if not os.path.exists(marker):
+        Path(marker).touch()
+    source_auth = hermes_profile_auth_path(cfg)
+    target_auth = os.path.join(profile, "auth.json")
+    if not os.path.lexists(target_auth) and os.path.exists(source_auth):
+        os.symlink(source_auth, target_auth)
+    return home
+
+
+def hermes_profile_dir(cfg, project=None, task=None, home=None, profile=None):
+    profile = profile or ((cfg.get("executor") or {}).get("hermes_profile") or "baton-exec-v2")
+    base = home or (hermes_task_home(project, task, cfg) if project is not None and task is not None else hermes_home(cfg))
+    return os.path.join(base, "profiles", profile)
 
 
 def memory_baton_home(cfg=None):
@@ -6474,7 +7106,7 @@ def _hermes_profile_create(cfg):
     return True
 
 
-def hermes_config_text(cfg):
+def hermes_config_text(cfg, project=None):
     # Keep this fixed and minimal: per-project settings are command-line/env state.
     provider = ((cfg.get("executor") or {}).get("provider") or "openai-codex")
     model = "gpt-5.6-luna"
@@ -6484,14 +7116,15 @@ def hermes_config_text(cfg):
             "display: {show_reasoning: false, streaming: false, inline_diffs: false}\n")
     if memory_installed(cfg):
         python = memory_venv_python(cfg) or "~/.baton/venv/bin/python"
+        project_root = project.root if project is not None else "${BATON_PROJECT_ROOT}"
         text += ("mcp_single_query_discovery_timeout: 60\n"
                  "mcp_servers:\n"
                  "  baton-memory:\n"
                  "    command: %s\n"
                  '    args: ["-m", "baton_memory.server"]\n'
-                 '    env: {MEM0_TELEMETRY: "false", BATON_HOME: "${BATON_HOME}", BATON_TASK: "${BATON_TASK}", BATON_LEG: "${BATON_LEG}", BATON_LEG_STARTED: "${BATON_LEG_STARTED}"}\n'
+                 '    env: {MEM0_TELEMETRY: "false", BATON_HOME: "${BATON_HOME}", BATON_PROJECT_ROOT: "%s", BATON_TASK: "${BATON_TASK}", BATON_LEG: "${BATON_LEG}", BATON_LEG_STARTED: "${BATON_LEG_STARTED}"}\n'
                  "    timeout: 30\n"
-                 "    tools: {resources: false, prompts: false}\n" % python)
+                 "    tools: {resources: false, prompts: false}\n" % (python, project_root))
     return text
 
 
@@ -6601,6 +7234,23 @@ def _context_candidate(directory, names):
     return None
 
 
+def _instruction_candidate(directory, name):
+    """Find an instruction filename while preserving on-disk case."""
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return None
+    if name in entries:
+        path = os.path.join(directory, name)
+        return path if os.path.isfile(path) else None
+    folded = name.casefold()
+    for entry in entries:
+        if entry.casefold() == folded:
+            path = os.path.join(directory, entry)
+            return path if os.path.isfile(path) else None
+    return None
+
+
 def hermes_context_files(project):
     """List project context in Hermes' precedence order.
 
@@ -6627,19 +7277,26 @@ def hermes_context_files(project):
     if hermes_candidates:
         return [hermes_candidates[0]]
     chain = []
-    current = canonical_dir(root)
+    chain_real = set()
+    current = canonical_dir(target)
+    root = canonical_dir(root)
     while True:
-        path = os.path.join(current, "AGENTS.md")
-        if os.path.isfile(path):
-            chain.append(path)
-        if current == target:
+        path = _instruction_candidate(current, "AGENTS.md") or _instruction_candidate(current, "agents.md")
+        if path:
+            real = os.path.realpath(path)
+            same_existing = any(os.path.exists(existing) and os.path.exists(path) and os.path.samefile(existing, path)
+                                for existing in chain)
+            if real not in chain_real and not same_existing:
+                chain.append(path)
+                chain_real.add(real)
+        if current == root or not current.startswith(root + os.sep):
             break
         parent = os.path.dirname(current)
-        if parent == current or not target.startswith(current + os.sep):
+        if parent == current:
             break
         current = parent
     if chain:
-        return chain
+        return list(reversed(chain))
     for name in ("CLAUDE.md", ".cursorrules"):
         path = os.path.join(cwd, name)
         if os.path.isfile(path):
@@ -6881,6 +7538,29 @@ def prepare_hermes_profile(project, cfg, upgrade_profile=False):
         print(f"  {path}")
     if not hermes_context_files(project):
         print("  （无）")
+
+
+def prepare_task_hermes_profile(project, task, cfg):
+    """Create a task-local Hermes profile without copying rotating credentials."""
+    home = hermes_task_home(project, task, cfg)
+    profile = hermes_profile_dir(cfg, project=project, task=task)
+    os.makedirs(profile, exist_ok=True)
+    _write_hermes_soul(os.path.join(profile, "SOUL.md"), hermes_soul_text(), cfg,
+                        created=not os.path.exists(os.path.join(profile, "SOUL.md")))
+    _write_readonly_profile_file(os.path.join(profile, "config.yaml"),
+                                 hermes_config_text(cfg, project=project), cfg)
+    marker = os.path.join(home, ".no-bundled-skills")
+    if not os.path.exists(marker):
+        Path(marker).touch()
+    source = hermes_profile_auth_path(cfg)
+    target = os.path.join(profile, "auth.json")
+    if os.path.lexists(target) and not os.path.islink(target):
+        # A task profile must never own a rotating OAuth copy.  Keep a user-created
+        # file only when it already points at the shared source.
+        raise ConfigError("任务 Hermes profile 的 auth.json 不是共享凭据符号链接：%s" % target)
+    if not os.path.lexists(target):
+        os.symlink(source, target)
+    return home
 
 
 def migrate_baton_config(project):
@@ -7151,6 +7831,11 @@ def cmd_new(project, args):
         text = read_text(os.path.join(TEMPLATES, "brief.md")).replace("{{TASK}}", args.task)
         with open(brief, "w", encoding="utf-8") as f:
             f.write(text)
+    harness = harness_path(project, args.task)
+    if not os.path.exists(harness):
+        with open(harness, "w", encoding="utf-8") as stream:
+            stream.write(build_harness_draft(project, args.task))
+    project.update_state(args.task, lambda s: s.update(task=args.task, harness_required=True))
     print(brief)
 
 
@@ -7183,8 +7868,37 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
         st = refresh_runner_liveness(project, task, st) if st.get("legs") else st
         cfg = config_for_state(project, st)
         require_supported_executor(cfg)
+        workspace_root = canonical_dir(st.get("launch_root") or project.root)
+        if not st.get("launch_root"):
+            project.update_state(task, lambda s: s.update(launch_root=workspace_root))
+            st = project.read_state(task, {}) or st
+        harness_file = harness_path(project, task)
+        harness_exists = os.path.isfile(harness_file)
+        harness_ready = harness_is_approved(project, task, st) if harness_exists else False
+        if kind == "start" and harness_exists and not harness_ready:
+            die(f"任务 {task} 的 harness.md 没有有效审定记录、哈希不符或仍带待审标记；"
+                f"请重新运行 baton harness approve {task} 后再启动")
+        if kind == "start" and not harness_exists:
+            print(f"WARN：任务 {task} 没有 harness.md，按旧任务上下文启动，未启用隔离。")
+        other = running_task(project, exclude=task)
+        if other:
+            die(f"同一启动目录已有任务 {other[0]} 的第 {other[1]} 轮运行，拒绝覆盖其上下文文件")
         escalation = escalation_decision(project, task, st, force=force_escalate)
         effective_cfg = _effective_executor_config(cfg, escalation)
+        context_isolation = harness_ready and (st.get("harness_required") or executor_isolation_enabled(st)) and (
+            not st.get("legs") or executor_isolation_enabled(st))
+        if context_isolation:
+            if cfg["executor"].get("backend") == "hermes":
+                home = st.get("hermes_home") or hermes_task_home(project, task, effective_cfg)
+                project.update_state(task, lambda s: s.update(hermes_home=home))
+                st = project.read_state(task, {}) or st
+                render_task_hermes_context(project, task, st, workspace_root=workspace_root)
+                prepare_task_hermes_profile(project, task, effective_cfg)
+            else:
+                home = st.get("codex_home") or codex_task_home(project, task)
+                project.update_state(task, lambda s: s.update(codex_home=home))
+                st = project.read_state(task, {}) or st
+                prepare_task_codex_context(project, task, st, workspace_root=workspace_root)
         if cfg["executor"].get("backend") == "hermes":
             hermes_preflight(project, cfg)
         if st.get("config_snapshot") and st.get("config_input_hash") != config_input_hash(project):
@@ -7204,9 +7918,6 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
             die(f"任务 {task} 第 {leg['n']} 轮仍在运行；先 baton wait 或 baton stop")
         if codex_alive(leg):
             die(f"上一轮的 codex 进程（pid {leg['codex_pid']}）还在运行；先 baton stop {task}")
-        other = running_task(project, exclude=task)
-        if other:
-            die(f"同一项目里任务 {other[0]} 的第 {other[1]} 轮还在运行，两个执行者不能同时改一个工作区")
         if st:
             surface_unreported(project, task, st, "续跑")
         n = len(st.get("legs", [])) + 1
@@ -7242,11 +7953,24 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
             print(f"注意：本轮起点回滚点没建成：{err}")
         last_path = project.leg_path(task, n, "last.json")
         if cfg["executor"].get("backend") == "hermes":
-            cmd = hermes_command(project, kind, st.get("thread_id"), prompt, cfg=effective_cfg)
+            try:
+                cmd = hermes_command(project, kind, st.get("thread_id"), prompt, cfg=effective_cfg,
+                                     task=task if st.get("hermes_home") else None,
+                                     workspace_root=workspace_root)
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                cmd = hermes_command(project, kind, st.get("thread_id"), prompt, cfg=effective_cfg)
             if not effective_cfg["executor"].get("sandbox_exec", True):
                 print("WARN：executor.sandbox_exec=false，Hermes 将不受 Seatbelt 写入边界保护。")
         else:
-            cmd = codex_command(project, kind, st.get("thread_id"), last_path, cfg=effective_cfg)
+            try:
+                cmd = codex_command(project, kind, st.get("thread_id"), last_path, cfg=effective_cfg,
+                                    workspace_root=workspace_root, isolated=bool(st.get("codex_home")))
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                cmd = codex_command(project, kind, st.get("thread_id"), last_path, cfg=effective_cfg)
         t0 = now()
         log_size = file_size(project.p("log.md"))
 
@@ -7299,7 +8023,7 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
         try:
             runner = platform_support.detached_popen([sys.executable, os.path.abspath(__file__), "--root", project.root,
                                        "_run", task, str(n)],
-                                      stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=project.root)
+                                      stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=workspace_root)
         finally:
             log.close()
         if hasattr(runner, "poll"):
@@ -7348,6 +8072,12 @@ def cmd_start(project, args):
         _validate_start_scope(project, scope)
     if scope and scope.get("verify") == "auto" and not (cfg.get("supervision") or {}).get("test_command"):
         die("supervision.test_command 为空；范围块 verify=auto 时必须配置验证命令，或写 verify=none")
+    if not st.get("legs") and os.path.isfile(harness_path(project, args.task)) \
+            and not harness_is_approved(project, args.task, st):
+        die(f"任务 {args.task} 的 harness.md 没有有效审定记录、哈希不符或仍带待审标记；"
+            f"请重新运行 baton harness approve {args.task} 后再启动")
+    if not os.path.isfile(harness_path(project, args.task)):
+        print(f"WARN：任务 {args.task} 没有 harness.md，按旧任务上下文启动，未启用隔离。")
     if st.get("thread_id"):
         die(f"任务 {args.task} 已有 Codex 会话 {st['thread_id']}；继续请用 baton resume")
     r = subprocess.run([platform_support.executable("git"), "check-ref-format", f"refs/baton/{args.task}/base"])
@@ -7363,7 +8093,8 @@ def cmd_start(project, args):
             # a task started by v2 keeps every checkpoint in the shadow repo
             st = project.update_state(args.task, lambda s: s.update(snapshot_store="shadow", task=args.task,
                                                                        scope=scope or {}, config_snapshot=cfg,
-                                                                       config_input_hash=config_input_hash(project)))
+                                                                       config_input_hash=config_input_hash(project),
+                                                                       launch_root=project.root))
             write_freeze_baseline(project, args.task, scope or {}, cfg)
             manifest = read_json(os.path.join(freeze_dir(project, args.task), "manifest.json"), {}) or {}
             project.update_state(args.task, lambda s: s.update(freeze_manifest=manifest,
@@ -7572,12 +8303,14 @@ def cmd_run(project, args):
     rc = -1
     result = None
     capacity_final = False
+    failure_kind_final = None
     capacity_retry_count = 0
     finished_ok = False
     memory_tool_reason = None
     try:
         cfg = config_for_state(project, st)
         require_supported_executor(cfg)
+        workspace_root = canonical_dir(st.get("launch_root") or project.root)
         # Keep retries on the model selected when this leg was launched.  The
         # task snapshot itself remains on the default model for later legs.
         if leg.get("model"):
@@ -7689,13 +8422,13 @@ def cmd_run(project, args):
             remote_refs_before = git_remote_refs(project.root)
             with open(leg["events"], "ab") as fout, open(leg["stderr"], "ab") as ferr:
                 if is_hermes:
-                    proc = platform_support.detached_popen(attempt_cmd, cwd=project.root, stdin=subprocess.DEVNULL,
+                    proc = platform_support.detached_popen(attempt_cmd, cwd=workspace_root, stdin=subprocess.DEVNULL,
                                             stdout=fout, stderr=ferr,
                                             env=hermes_executor_env(project, task, n, leg["started_at"], cfg, st))
                 else:
                     with open(attempt_prompt, "rb") as fin:
-                        proc = platform_support.detached_popen(attempt_cmd, cwd=project.root, stdin=fin, stdout=fout,
-                                                stderr=ferr)
+                        proc = platform_support.detached_popen(attempt_cmd, cwd=workspace_root, stdin=fin, stdout=fout,
+                                                stderr=ferr, env=codex_executor_env(project, task, st))
             set_codex_pid(proc.pid, exited=False)
             while proc.poll() is None:
                 time.sleep(0.2)
@@ -7790,13 +8523,13 @@ def cmd_run(project, args):
                                   "artifact": "", "change_size": "unknown"}
             new_events, _ = read_events(leg["events"], event_offset)
             failed_call = rc_value != 0 or not valid_executor_result(current_result)
-            capacity = (not reason and failed_call and
-                        is_capacity_failure(leg["events"], leg["stderr"], event_offset,
-                                            stderr_offset, rc_value, current_result))
+            failure_kind = (None if reason or not failed_call else
+                            capacity_failure_kind(leg["events"], leg["stderr"], event_offset,
+                                                  stderr_offset, rc_value, current_result))
             has_output = bool(hermes_stdout.strip()) if is_hermes else any(ev.get("type") == "item.completed"
                              and isinstance(ev.get("item"), dict)
                              and ev["item"].get("type") != "error" for ev in new_events)
-            return rc_value, current_result, capacity, has_output, result_error
+            return rc_value, current_result, failure_kind, has_output, result_error
 
         attempt = 0
         while True:
@@ -7812,15 +8545,21 @@ def cmd_run(project, args):
                     stream.write("上一次调用因模型容量不足中断，请从中断处继续当前任务，遵守 Baton 执行协议，本轮结束按 JSON schema 输出。")
                 if cfg["executor"].get("backend") == "hermes":
                     retry_text = read_text(retry_prompt)
-                    attempt_cmd = hermes_command(project, "resume", thread_id, retry_text, cfg=cfg)
+                    attempt_cmd = hermes_command(project, "resume", thread_id, retry_text, cfg=cfg,
+                                                 task=task if st.get("hermes_home") else None,
+                                                 workspace_root=workspace_root)
                 else:
-                    attempt_cmd = codex_command(project, "resume", thread_id, leg["last"], cfg=cfg)
+                    attempt_cmd = codex_command(project, "resume", thread_id, leg["last"], cfg=cfg,
+                                                workspace_root=workspace_root,
+                                                isolated=bool(st.get("codex_home")))
                 attempt_prompt = retry_prompt
             else:
                 attempt_cmd = list(leg["cmd"])
                 attempt_prompt = leg["prompt"]
-            rc, result, capacity, has_output, result_error = run_attempt(attempt_cmd, attempt_prompt)
+            rc, result, failure_kind, has_output, result_error = run_attempt(attempt_cmd, attempt_prompt)
             attempt += 1
+            if failure_kind == "quota":
+                failure_kind_final = "quota"
             if st.get("thread_id") is None:
                 tid = thread_id_from(leg["events"])
                 if tid:
@@ -7835,10 +8574,12 @@ def cmd_run(project, args):
                     retry_prompt = project.leg_path(task, n, "result-retry.prompt.md")
                     with open(retry_prompt, "w", encoding="utf-8") as stream:
                         stream.write("只重新输出本轮结果，不要继续修改文件。必须严格输出 BATON_RESULT_BEGIN、JSON、BATON_RESULT_END。校验错误：" + (result_error or "结果缺失"))
-                    pending_attempt_cmd = hermes_command(project, "resume", resume_id, read_text(retry_prompt), cfg=cfg)
+                    pending_attempt_cmd = hermes_command(project, "resume", resume_id, read_text(retry_prompt), cfg=cfg,
+                                                         task=task if st.get("hermes_home") else None,
+                                                         workspace_root=workspace_root)
                     pending_attempt_prompt = retry_prompt
                     continue
-            if not capacity or finished_ok or reason or error:
+            if failure_kind != "capacity" or finished_ok or reason or error:
                 break
             if has_output:
                 capacity_retry_count = 0
@@ -7846,6 +8587,7 @@ def cmd_run(project, args):
                 retry_cfg, immediate_used, delayed_used, has_output)
             if phase is None:
                 capacity_final = True
+                failure_kind_final = "capacity"
                 break
             if phase == "delayed":
                 add_wait(phase, capacity_retry_count + 1, delay)
@@ -7965,8 +8707,9 @@ def cmd_run(project, args):
         else:
             lg.pop("error", None)
         lg.pop("capacity_wait", None)
+        if capacity_final or failure_kind_final:
+            lg["failure_kind"] = failure_kind_final or "capacity"
         if capacity_final:
-            lg["failure_kind"] = "capacity"
             lg["capacity_retry_count"] = capacity_retry_count
         if violation:
             lg["violations"] = violation.get("violations", [])
@@ -8092,7 +8835,23 @@ def leg_event_text(project, task, leg):
         elif monitor_failed:
             lines.append("监督失败：" + str(monitor.get("error") or "未知原因"))
             lines.append(f"原事件摘要：{clip(str((leg.get('result') or {}).get('summary') or ''), 600)}")
+            if monitor.get("failure_kind") in {"quota", "capacity"}:
+                kind_text = "额度耗尽" if monitor.get("failure_kind") == "quota" else "容量不足"
+                rerun = f"baton monitor {task} {monitor.get('id')} --rerun"
+                lines.append(f"监督{kind_text}属于基础设施问题，不是方法失败；等待重置或换账号后 {rerun}。")
+                reset = _quota_reset_text()
+                if reset:
+                    lines.append("额度重置时间：" + reset)
     check_monitor = leg.get("monitor_check") or {}
+    if check_monitor.get("status") == "failed":
+        lines.append("轮中检查失败：" + str(check_monitor.get("error") or "未知原因"))
+        if check_monitor.get("failure_kind") in {"quota", "capacity"} and check_monitor.get("id"):
+            kind_text = "额度耗尽" if check_monitor.get("failure_kind") == "quota" else "容量不足"
+            rerun = f"baton monitor {task} {check_monitor.get('id')} --rerun"
+            lines.append(f"轮中检查{kind_text}属于基础设施问题，不是方法失败；等待重置或换账号后 {rerun}。")
+            reset = _quota_reset_text()
+            if reset:
+                lines.append("额度重置时间：" + reset)
     if check_monitor.get("brief_path"):
         lines.append(f"轮中检查简报：{check_monitor.get('brief_path')}")
         lines.append(f"轮中检查结论：{check_monitor.get('conclusion')}；偏离条数：{check_monitor.get('findings', 0)}")
@@ -8105,6 +8864,11 @@ def leg_event_text(project, task, leg):
             for i, item in enumerate(retries))
         reset = f"；其中最后连续 {consecutive} 次" if consecutive != count else ""
         lines.append(f"容量不足，已自动重试 {count} 次{reset}" + ("；" + times if times else ""))
+    elif leg.get("failure_kind") == "quota":
+        lines.append("额度耗尽属于基础设施问题，不是方法失败；等待额度重置或换账号后 baton resume " + task + "。")
+        reset = _quota_reset_text()
+        if reset:
+            lines.append("额度重置时间：" + reset)
     if leg.get("escalated") and leg.get("status") in {"blocked", "failed"}:
         lines.append("升级轮未通过，后续不会自动再次升级；请 conductor 决定继续用 Sol、拆分任务或问用户。")
     if leg.get("violations"):
@@ -8162,6 +8926,8 @@ def leg_event_text(project, task, leg):
                  if ev == "MONITOR_FAILED" else
                  "容量不足的自动重试已用完：等一段时间后 baton resume，或问用户是否换模型；不要接手写代码。"
                  if ev == "FAILED" and leg.get("failure_kind") == "capacity"
+                 else "额度耗尽属于基础设施问题：等待重置或换账号后 baton resume；不要因此放弃或 REVISE。"
+                 if ev == "FAILED" and leg.get("failure_kind") == "quota"
                  else NEXT_STEP.get(ev, "查看 baton status"))
     lines.append("下一步：" + next_step)
     return "\n".join(lines)
@@ -8195,6 +8961,13 @@ def cmd_wait(project, args):
             reap_detached_runners()
             return
         if leg["status"] != "running" and not monitor_running:
+            accepted_dossier, _ = _latest_final_accept(project, args.task)
+            if accepted_dossier and st.get("status") != "closed":
+                print(f"BATON::EVENT IDLE task={args.task} leg={leg['n']}：已最终 ACCEPT（{accepted_dossier}），下一步 baton close；"
+                      "close 被验证门槛拒绝时用 --waive \"<原因>\" --user-approved 或 --abandon \"<原因>\"。")
+                print_lean_hint(project, args.task, st)
+                reap_detached_runners()
+                return
             if leg.get("reported"):
                 print(f"BATON::EVENT IDLE task={args.task} leg={leg['n']}：没有运行中的一轮，"
                       f"上一轮状态 {leg['status']}（已处理过）。需要继续就 baton resume。")
@@ -8457,7 +9230,8 @@ def cmd_status(project, args):
         elif mstatus == "completed":
             print(f"monitor：完成，监督简报 {monitor.get('brief_path')}")
         elif mstatus == "failed":
-            print(f"monitor：失败，{monitor.get('error') or '未知原因'}；卷宗 {monitor.get('id')}，可用 --rerun 重跑")
+            rerun = f"baton monitor {task} {monitor.get('id')} --rerun"
+            print(f"monitor：失败，{monitor.get('error') or '未知原因'}；卷宗 {monitor.get('id')}，可用 {rerun}")
         verdict = _verdict_for_dossier(project, task, monitor.get("id")) if monitor.get("id") else None
         if verdict:
             print(f"当前卷宗裁决：已裁决 {verdict.get('conclusion')}（ledger seq {verdict.get('seq')}）")
@@ -8609,6 +9383,15 @@ def cmd_close(project, args):
     st = project.load_state(task)
     if st.get("status") == "closed":
         die(f"任务 {task} 已 closed")
+    waive_reason = getattr(args, "waive", None)
+    abandon_reason = getattr(args, "abandon", None)
+    if waive_reason is not None and abandon_reason is not None:
+        die("--waive 与 --abandon 互斥")
+    if waive_reason is not None:
+        if not waive_reason.strip():
+            die("--waive 需要写明豁免原因")
+        if not getattr(args, "user_approved", False):
+            die("--waive 需要 --user-approved")
     for leg in st.get("legs", []):
         monitor_value = leg.get("monitor") or {}
         curation_monitor = str(monitor_value.get("id", "")).startswith(task + "-curate-")
@@ -8617,11 +9400,13 @@ def cmd_close(project, args):
                 (leg.get("n"), leg.get("status"), json.dumps(monitor_value, ensure_ascii=False)))
     if not verify_ledger(project):
         die("账本校验失败，不能 close")
-    reason = getattr(args, "abandon", None)
+    reason = abandon_reason
     if reason is not None:
         if not reason.strip():
             die("--abandon 需要写明放弃原因")
         record = append_ledger(project, {"type": "abandon", "task": task, "reason": reason.strip()})
+        restore_task_hermes_context(project, task, st)
+        restore_task_codex_context(project, task, st)
         project.update_state(task, lambda s: s.update(status="closed", closed={"abandoned": True,
             "reason": reason.strip(), "ledger_seq": record.get("seq"), "at": now()}))
         prune_closed_task(project, task)
@@ -8647,12 +9432,34 @@ def cmd_close(project, args):
     if not leg:
         die("找不到终审卷宗所在轮次，不能 close")
     verify = leg.get("verify") or read_json(project.leg_path(task, leg.get("n"), "verify.json"), {}) or {}
+    verification_gate = {
+        "exit_code": verify.get("exit_code"),
+        "acceptance_failed": list(verify.get("acceptance_failed") or []),
+        "skipped": bool(verify.get("skipped")),
+    }
+    gate_failed = False
     if verify.get("skipped"):
         if "没有 baton 亲跑" not in (verdict.get("rendered") or verdict.get("verdict") or ""):
-            die("终审没有亲跑验证，且 ACCEPT 裁决没有明确写明这一点")
-        print("提示：本任务没有 baton 亲跑验证，close 依据裁决中的明确说明。")
+            gate_failed = True
+        else:
+            print("提示：本任务没有 baton 亲跑验证，close 依据裁决中的明确说明。")
     elif verify.get("exit_code") != 0 or verify.get("acceptance_failed"):
-        die("终审轮次验收测试未全部通过，不能 close")
+        gate_failed = True
+    if gate_failed and waive_reason is None:
+        die("终审轮次验收测试未全部通过，不能 close；可用 --waive \"<原因>\" --user-approved（需要用户核准），"
+            "或 --abandon \"<原因>\"。")
+    waiver = None
+    if gate_failed and waive_reason is not None:
+        if _confirmation_delegated(project, task):
+            approver = "conductor-delegated"
+            print("已按 approvals.delegate_to_conductor 由 conductor 代为确认")
+        else:
+            approver = _require_task_confirmation(task)
+        waiver = {"reason": waive_reason.strip(), "approval": approver,
+                  "method": approver, "items": verification_gate}
+        print("提示：已按核准原因豁免终审验证门槛：" + waive_reason.strip())
+    elif waive_reason is not None:
+        print("提示：终审验证已通过，忽略 --waive；close 行为不变。")
     store = project.store(task, st)
     if not store or not leg.get("end_ref"):
         die("终审卷宗缺少终点快照，不能 close")
@@ -8666,9 +9473,16 @@ def cmd_close(project, args):
         die(f"终点快照比较失败，不能 close：{exc}")
     if changed:
         die("ACCEPT 之后代码又变过，当前快照与终审终点不一致，不能 close")
-    record = append_ledger(project, {"type": "close", "task": task, "dossier": dossier_id,
-                                     "dossier_hash": dossier_hash, "verdict_seq": verdict.get("seq")})
+    close_record = {"type": "close", "task": task, "dossier": dossier_id,
+                    "dossier_hash": dossier_hash, "verdict_seq": verdict.get("seq")}
+    if waiver:
+        close_record.update({"waive_reason": waiver["reason"], "waive_approver": waiver["approval"],
+                             "waive_method": waiver["method"], "waived": waiver["items"],
+                             "waive": waiver})
+    record = append_ledger(project, close_record)
     rows = _close_rejected_findings(project, task, ledger_records(project))
+    restore_task_hermes_context(project, task, st)
+    restore_task_codex_context(project, task, st)
     project.update_state(task, lambda s: s.update(status="closed", closed={"dossier": dossier_id,
         "verdict_seq": verdict.get("seq"), "ledger_seq": record.get("seq"), "at": now()}))
     prune_closed_task(project, task)
@@ -9659,6 +10473,10 @@ def main():
     s = sub.add_parser("new", help="新建任务并生成简报模板")
     s.add_argument("task")
     s.add_argument("--brief", help="用已有文件作为简报")
+    s = sub.add_parser("harness", help="审定任务 harness.md")
+    harness_sub = s.add_subparsers(dest="harness_action", required=True)
+    h = harness_sub.add_parser("approve", help="删除待审标记并登记审定内容哈希")
+    h.add_argument("task")
     s = sub.add_parser("start", help="启动首轮（codex exec）")
     s.add_argument("task")
     for name, helptext in (("resume", "带指挥消息续跑（codex exec resume）"), ("steer", "停止当前轮并带纠偏消息续跑")):
@@ -9699,6 +10517,10 @@ def main():
     s.add_argument("task")
     s.add_argument("--abandon", metavar="REASON",
                    help="没有 ACCEPT 终审也关闭（如以 REPORT 结束的任务），写入账本并清理卷宗代码")
+    s.add_argument("--waive", metavar="REASON",
+                   help="验证门槛失败时，写明原因并配合 --user-approved 豁免；验证已通过时忽略")
+    s.add_argument("--user-approved", action="store_true",
+                   help="核准 --waive；TTY 下逐字确认任务名，delegate_to_conductor 时由 conductor 代办")
     s = sub.add_parser("gc", help="清理已 closed 任务的卷宗代码，保留记录和账本")
     s.add_argument("--dry-run", action="store_true", help="只列出将清理的卷宗、文件数和字节数")
     s = sub.add_parser("supervised", help="记录一次监管结论并重置计时")
@@ -9773,7 +10595,7 @@ def main():
             os.environ["BATON_HOME"] = os.path.abspath(os.path.expanduser("~/.baton"))
         else:
             os.environ["BATON_HOME"] = os.path.abspath(expanded_home)
-    root = canonical_dir(args.root) if args.root else find_project_dir(os.getcwd(), legacy=args.cmd != "init")
+    root = resolve_cli_project_root(os.getcwd(), args.cmd, explicit_root=args.root)
     project = Project(root)
     if args.cmd not in ("init", "quota", "doctor", "config", "statusline", "memory"):
         project.require_init()
@@ -9783,6 +10605,7 @@ def main():
         project.check_identity(warn_only=args.cmd in ("doctor", "config"))
     handler = {
         "init": cmd_init, "statusline": cmd_statusline, "new": cmd_new, "start": cmd_start,
+        "harness": cmd_harness_approve,
         "resume": cmd_resume, "steer": cmd_steer, "wait": cmd_wait, "monitor": cmd_monitor, "status": cmd_status,
         "close": cmd_close, "gc": cmd_gc,
         "supervised": cmd_supervised, "stop": cmd_stop, "checkpoint": cmd_checkpoint, "refs": cmd_refs,

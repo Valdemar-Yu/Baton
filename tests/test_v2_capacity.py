@@ -110,6 +110,7 @@ json.dump({"status": "done", "summary": "fake", "artifact": "", "change_size": "
         if config:
             (self.project_root / "baton.json").write_text(json.dumps(config), encoding="utf-8")
         self.assertEqual(self.cli("new", "capacity").returncode, 0)
+        self.assertEqual(self.cli("harness", "approve", "capacity").returncode, 0)
         brief = self.project_root / ".baton" / "tasks" / "capacity" / "brief.md"
         acceptance_paths = acceptance or []
         brief.write_text(

@@ -20,8 +20,9 @@
 ; These paths are explicitly denied after the broad read/default rules.
 (deny file-write* (subpath (param "BATON_TASKS")))
 (deny file-write* (subpath (param "BATON_REVIEWS")))
+(deny file-write* (subpath (param "BATON_HOME")))
+(allow file-write* (subpath (param "PROFILE_DIR")))
 (deny file-write* (literal (param "PROFILE_SOUL")))
 (deny file-write* (literal (param "PROFILE_CONFIG")))
 (deny file-write* (literal (param "PROFILE_ENV")))
-(deny file-write* (subpath (param "BATON_HOME")))
 (deny file-write* (subpath (param "CLAUDE_HOME")))

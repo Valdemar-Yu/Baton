@@ -43,6 +43,9 @@ baton new <task>
 `allow` 是 executor 可以修改或新建的路径，新写的回归测试放这里；`deny` 禁止触碰。
 `acceptance` 只列已存在、必须通过的测试文件或 pytest node id，它们属于锁定级，不能修改、删除或新建；不要列源码或待写的新测试，没有现成验收测试时留空 `[]`。
 `frozen` 列其他需要锁定的已有文件；`verify` 为 `auto` 时运行配置的验证命令，`none` 时跳过自动验证。验收标准的文字描述写在简报正文。
+每个任务的 `harness.md` 是经 conductor 审定的长期项目上下文；固定小节、初稿来源和审定规则见 [`references/harness.md`](references/harness.md)。
+`baton start` 前必须完成审阅并删除待审标记，brief 只负责本任务的目标、范围和验收条件。
+审阅完成后运行 `baton harness approve <task>`；该命令会删除待审标记、记录审定时间和内容哈希，随后才能 `baton start`。
 
 确认简报后启动并交给后台等待：
 
@@ -130,6 +133,7 @@ baton rule <task> <curation-dossier> <verdict-file> --curation
 | `baton config [--json]` | 查看合并后的 v2 配置 |
 | `baton init [--migrate] [--upgrade-profile]` | 初始化、迁移 v1 配置、更新 profile |
 | `baton new <task>` | 生成简报模板 |
+| `baton harness approve <task>` | 审定 harness.md，删除待审标记并登记内容哈希 |
 | `baton start/resume/wait <task>` | 启动、按裁决续跑、后台等待 |
 | `baton status/diff <task>` | 监管快照和证据差异 |
 | `baton monitor <task> [dossier]` | 运行或重跑监督 monitor |
@@ -138,7 +142,7 @@ baton rule <task> <curation-dossier> <verdict-file> --curation
 | `baton supervised <task> --verdict ...` | 记录 TICK 监管结论 |
 | `baton restore-frozen` / `baton amend` | 恢复冻结或提交用户核准的修正案 |
 | `baton preset list` / `baton preset use <名> [--task <任务>]` | 列出或切换 baton.json `presets` 里的执行者/monitor 预设；带 `--task` 时同步已启动任务的配置快照（该任务不能有运行中的一轮） |
-| `baton close <task>` | 验收通过后关闭任务 |
+| `baton close <task>` | 验收通过后关闭任务；验证门槛因环境失败时可用 `--waive "原因" --user-approved` 豁免，或用 `--abandon "原因"` 放弃关闭 |
 | `baton close <task> --abandon "<原因>"` | 不再继续、也不会有 ACCEPT 终审的任务（如以 REPORT 结束）：账本记一条 abandon，任务 closed，清理卷宗代码 |
 | `baton memory install/verify/reindex` | 安装、校验、重建记忆索引 |
 

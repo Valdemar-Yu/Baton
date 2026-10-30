@@ -14,6 +14,8 @@ monitor 是 `baton` 拉起的只读证据审阅者。它只读卷宗和代码快
 
 monitor 失败时可以等待进程退出、用 `baton monitor <task> <dossier> --rerun` 重跑，或把情况交给用户。不能跳过失败的简报直接 `baton rule`、`resume` 或 close。
 
+额度耗尽和容量不足属于基础设施问题，不是方法失败；记录重置时间（能取到时），等待重置或换账号后用 `baton monitor <task> <dossier> --rerun`，不要因此放弃或 REVISE。
+
 ## 轮中结论
 
 - `DRIFT`：逐条读简报；认可就写消息 `baton steer`，不认可就 `baton supervised <task> --dismiss F1 --reason "..."`。

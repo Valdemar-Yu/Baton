@@ -17,6 +17,9 @@ TOOL_DESCRIPTION = "每个事实单独写一条短查询，不要把几件事拼
 
 
 def _find_project(start: Optional[str] = None) -> str:
+    configured_root = os.environ.get("BATON_PROJECT_ROOT", "").strip()
+    if configured_root and "${" not in configured_root:
+        return str(Path(configured_root).expanduser().resolve())
     current = Path(start or os.getcwd()).resolve()
     while True:
         if (current / ".baton").is_dir():

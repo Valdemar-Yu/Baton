@@ -85,12 +85,17 @@ hermes -p baton-exec-v2 auth remove openai-codex <根目录带进来的旧条目
 /baton 给 parser 加流式解析，保持接口兼容，tests/ 全部通过
 ```
 
-conductor 会先运行 `doctor`、`config`，写 `.baton/tasks/<task>/brief.md`（验收、允许/禁止路径、验证命令和 `baton-scope` 范围块），再运行：
+conductor 会先运行 `doctor`、`config`，再 `baton new <task>`。它写 `.baton/tasks/<task>/brief.md`（验收、允许/禁止路径、验证命令和 `baton-scope` 范围块），并审改 Baton 自动起草的 `.baton/tasks/<task>/harness.md`：只留这个项目的长期事实，删掉主会话专用的流程指令和上层目录的无关内容。审定后再启动：
 
 ```bash
+baton harness approve <task>
 baton start <task>
 baton wait <task> &
 ```
+
+`harness approve` 记录内容哈希；harness 没审定、审定后又被改过，`start` 都会拒绝。executor 拿到的项目指令只来自这份 harness：Hermes 渲染成启动目录下的 `.hermes.md`，Codex 渲染成 `AGENTS.override.md`，两者都写进 `.git/info/exclude`，任务 close 时清理。每个任务有独立的 Hermes home 和 Codex home，会话、记忆不跨任务共享，skills 共享。
+
+项目根就是运行 `baton` 的目录。当前目录没有 `baton.json`、上层目录有时，`new`/`start` 会拒绝，提示先在当前目录 `baton init`（或显式传 `--root`），避免子目录任务落到上层项目、带上上层的 AGENTS.md 和记忆。executor 的工作目录也是这个目录。
 
 executor 每次小修改追加 `.baton/log.md`；大修改写 `.baton/reports/R*.html` 后暂停。monitor 生成独立监督简报，conductor 逐条写 `baton-verdict`，运行 `baton rule`，通过门槛后才 `baton resume --verdict`。任务结束要经过终审和 `baton close`。容量错误会自动立即重试 3 次，再延迟 15 分钟重试 1 次；用尽后产生 FAILED，由 conductor 决定换模型、拆分或询问用户。
 
@@ -132,7 +137,9 @@ baton init --migrate
 
 **容量重试为什么等待？** 这是模型服务容量错误，不是代码失败。Baton 立即重试 3 次，再等待 15 分钟重试一次；全部失败后停止本轮，等 conductor 处理。
 
-**monitor 为什么可能带着 Codex 全局指令？** Codex monitor 使用只读参数，但 `~/.codex/AGENTS.md` 是否被 CLI 读取由 CLI 版本决定。`baton doctor --monitor-probe` 会探测并在卷宗标明；monitor 只读，不会执行其中的写入要求。
+**monitor 为什么可能带着 Codex 全局指令？** Codex monitor 使用只读参数，但 `~/.codex/AGENTS.md` 是否被 CLI 读取由 CLI 版本决定。`baton doctor --monitor-probe` 会探测并在卷宗标明；monitor 只读，不会执行其中的写入要求。executor 不受这个问题影响：它用任务自己的 CODEX_HOME（不含全局 AGENTS.md），并以 `baton.json` 作为 project root marker，上层目录的 AGENTS.md 不会注入。
+
+**旧任务会受 harness 门禁影响吗？** 不会。升级前创建、没有 `harness.md` 的任务沿用原来的 CODEX_HOME/HERMES_HOME，可以照常 resume。
 
 **Hermes 没有 sandbox-exec 怎么办？** 在项目 `baton.json` 显式写：
 

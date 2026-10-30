@@ -17,6 +17,9 @@
     (literal "/dev/tty")
     (literal "/dev/dtracehelper"))
 
+; The broad deny above rejects Baton's state (including BATON_HOME).  The
+; equivalent explicit rule is kept as documentation: (deny file-write* (subpath (param "BATON_HOME"))).
+; only re-allowed mutable root is this monitor's own Hermes home in PROFILE_DIR.
 (deny file-write* (literal (param "PROFILE_SOUL")))
 (deny file-write* (literal (param "PROFILE_CONFIG")))
 (deny file-write* (literal (param "PROFILE_ENV")))

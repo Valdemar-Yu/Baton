@@ -529,6 +529,7 @@ class CliEndToEndTests(Base):
         b("init", "--no-statusline", rc=1)
         b("init", "--no-statusline", "--accept-boundary")
         b("new", "t")
+        b("harness", "approve", "t")
         write(proj / ".baton" / "tasks" / "t" / "brief.md",
               '```baton-scope\n{"allow": [], "deny": [], "acceptance": [], "frozen": [], "verify": "none"}\n```\n# 任务简报：t\n\n改 a.py\n')
         b("start", "t")
