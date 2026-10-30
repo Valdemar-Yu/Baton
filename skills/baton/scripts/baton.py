@@ -6534,10 +6534,172 @@ def statusline_report(project):
 
 HARNESS_PENDING_MARKER = "<!-- BATON_HARNESS_REVIEW_REQUIRED（待审：conductor 审改后删除本行，才能 baton start） -->"
 HARNESS_LENGTH_WARNING = "<!-- BATON HARNESS WARNING: 长度超过 4000 字，请 conductor 压缩后再启动 -->"
+HARNESS_BASE_METADATA_RE = re.compile(
+    r"^<!-- baton-harness-base source=(.*?) source_sha256=([0-9a-fA-F]+) approved_at=(.*?) -->$"
+)
+HARNESS_BASE_EDIT_NOTE = (
+    "> 这是给 conductor 的改写初稿：请只保留 executor 会用到的稳定规则，例如代码注释风格、"
+    "远程同步红线和运行环境约束；删除主会话专用的流程、写作 Skill 调用规则，以及与代码无关的报告文风。"
+)
 
 
 def harness_path(project, task):
     return os.path.join(project.task_dir(task), "harness.md")
+
+
+def harness_base_path():
+    """Return the account-level executor base outside any project state."""
+    return os.path.join(memory_baton_home(), "harness-base.md")
+
+
+def harness_base_source_path():
+    """Return the user instruction file used to derive the executor base."""
+    return os.path.abspath(os.path.expanduser("~/.claude/CLAUDE.md"))
+
+
+def _harness_base_metadata(text):
+    first, _, _ = text.partition("\n")
+    match = HARNESS_BASE_METADATA_RE.match(first.strip())
+    if not match:
+        return None
+    return {
+        "source": match.group(1),
+        "source_sha256": match.group(2).lower(),
+        "approved_at": match.group(3),
+    }
+
+
+def _harness_base_body(text):
+    """Remove metadata and review marker before embedding the base in a task harness."""
+    lines = text.splitlines()
+    if lines and HARNESS_BASE_METADATA_RE.match(lines[0].strip()):
+        lines = lines[1:]
+    body = "\n".join(lines).replace(HARNESS_PENDING_MARKER, "")
+    return body.strip()
+
+
+def _harness_base_info(path=None):
+    path = path or harness_base_path()
+    info = {
+        "path": path,
+        "exists": os.path.isfile(path),
+        "pending": False,
+        "metadata": None,
+        "body": "",
+        "source_path": harness_base_source_path(),
+        "source_sha256": _sha256_file(harness_base_source_path()),
+        "source_matches": False,
+    }
+    if not info["exists"]:
+        return info
+    text = read_text(path)
+    info["pending"] = HARNESS_PENDING_MARKER in text
+    info["metadata"] = _harness_base_metadata(text)
+    info["body"] = _harness_base_body(text)
+    if info["metadata"]:
+        recorded_source = info["metadata"].get("source") or info["source_path"]
+        current_source = harness_base_source_path()
+        current = _sha256_file(current_source)
+        info["source_sha256"] = current
+        info["source_matches"] = bool(
+            current and current == info["metadata"].get("source_sha256") and
+            os.path.abspath(recorded_source) == os.path.abspath(current_source))
+    return info
+
+
+def _harness_base_status(info=None):
+    info = info or _harness_base_info()
+    if not info["exists"]:
+        return "missing"
+    if info["pending"] or not info["metadata"] or not info["body"]:
+        return "pending"
+    if not info["source_matches"]:
+        return "stale"
+    return "approved"
+
+
+def _harness_base_metadata_line(source, source_sha256, approved_at):
+    return "<!-- baton-harness-base source=%s source_sha256=%s approved_at=%s -->" % (
+        source, source_sha256, approved_at)
+
+
+def _harness_base_backup_path(path):
+    timestamp = datetime.datetime.fromtimestamp(now()).strftime("%Y%m%d%H%M%S")
+    candidate = "%s.bak.%s" % (path, timestamp)
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = "%s.bak.%s-%s" % (path, timestamp, suffix)
+        suffix += 1
+    return candidate
+
+
+def cmd_harness_base(project, args):
+    """Inspect, initialize, or approve the account-level harness base."""
+    del project  # The base intentionally works without a project directory.
+    path = harness_base_path()
+    source = harness_base_source_path()
+    action = "status"
+    if getattr(args, "init", False):
+        action = "init"
+    if getattr(args, "approve", False):
+        if action != "status":
+            die("baton harness base 的 --init 和 --approve 不能同时使用")
+        action = "approve"
+    if getattr(args, "force", False) and action != "init":
+        die("--force 只能和 baton harness base --init 一起使用")
+
+    if action == "status":
+        info = _harness_base_info(path)
+        status = _harness_base_status(info)
+        status_text = {"missing": "不存在", "pending": "待审", "stale": "已审定但源文件已变化",
+                       "approved": "已审定"}[status]
+        recorded = (info["metadata"] or {}).get("source_sha256") or "无"
+        current = info["source_sha256"] or "无"
+        match = "一致" if info["source_matches"] else "不一致"
+        print("基底路径：%s" % path)
+        print("是否存在：%s" % ("是" if info["exists"] else "否"))
+        print("是否待审：%s（%s）" % ("是" if info["pending"] else "否", status_text))
+        print("记录的 source_sha256：%s" % recorded)
+        print("当前 ~/.claude/CLAUDE.md 的 source_sha256：%s（%s）" % (current, match))
+        print("字数：%d" % len(info["body"]))
+        return
+
+    if not os.path.isfile(source):
+        die("找不到源文件 %s；请先创建 ~/.claude/CLAUDE.md" % source)
+
+    if action == "init":
+        if os.path.exists(path) and not getattr(args, "force", False):
+            die("harness-base.md 已存在：%s；覆盖请使用 --force" % path)
+        if os.path.exists(path):
+            backup = _harness_base_backup_path(path)
+            shutil.copy2(path, backup)
+            print("已备份旧基底：%s" % backup)
+        source_sha256 = _sha256_file(source)
+        generated_at = stamp()
+        source_text = read_text(source).rstrip()
+        content = ("%s\n%s\n\n%s\n\n%s\n" % (
+            _harness_base_metadata_line(source, source_sha256, generated_at),
+            HARNESS_PENDING_MARKER, HARNESS_BASE_EDIT_NOTE, source_text))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        print("已生成待审 harness-base.md：%s" % path)
+        return
+
+    # approve
+    if not os.path.isfile(path):
+        die("找不到 harness-base.md：%s；请先运行 baton harness base --init" % path)
+    source_sha256 = _sha256_file(source)
+    text = read_text(path)
+    body = _harness_base_body(text)
+    if not body:
+        die("harness-base.md 不能为空；请先改写并保留 executor 规则：%s" % path)
+    approved_at = stamp()
+    content = "%s\n\n%s\n" % (
+        _harness_base_metadata_line(source, source_sha256, approved_at), body)
+    with open(path, "w", encoding="utf-8") as stream:
+        stream.write(content)
+    print("已审定 harness-base.md（sha256 %s，%s）" % (source_sha256, approved_at))
 
 
 def _harness_instruction_sources(project):
@@ -6565,9 +6727,6 @@ def _harness_instruction_sources(project):
                                 for existing in paths)
             if path not in paths and not same_existing:
                 paths.append(path)
-    user = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
-    if os.path.isfile(user) and user not in paths:
-        paths.append(user)
     return paths
 
 
@@ -6593,6 +6752,17 @@ def build_harness_draft(project, task, cfg=None):
              "> 这是项目长期事实的上下文草稿。conductor 审定后删除顶部待审标记；删除只对 conductor 有效的流程指令（例如“写代码走 Baton、主会话不改代码”），不要把本任务简报复制进来。",
              "",
              "## 项目约定", ""]
+    base = _harness_base_info()
+    base_status = _harness_base_status(base)
+    lines.extend(["### 用户级基底（harness-base.md）", ""])
+    if base_status == "missing":
+        lines.extend(["未找到用户级基底 %s；conductor 可运行 `baton harness base --init` 从 ~/.claude/CLAUDE.md 生成并审定，之后的任务自动带入。" % base["path"], ""])
+    elif base_status == "pending":
+        lines.extend(["用户级基底 %s 仍待审定；请先运行 `baton harness base --approve`，审定后之后的任务自动带入。" % base["path"], ""])
+    else:
+        lines.extend([base["body"], ""])
+        if base_status == "stale":
+            lines.extend(["警告：~/.claude/CLAUDE.md 自基底审定后已修改；请 conductor 判断是否同步 harness-base.md，再运行 baton harness base --approve。", ""])
     sources = _harness_instruction_sources(project)
     if sources:
         for path in sources:
@@ -6670,6 +6840,12 @@ def cmd_harness_approve(project, args):
                           "ledger_seq": record["seq"]},
     ))
     print(f"已审定 harness.md（sha256 {digest}，{approved_at}）")
+
+
+def cmd_harness(project, args):
+    if args.harness_action == "base":
+        return cmd_harness_base(project, args)
+    return cmd_harness_approve(project, args)
 
 
 def _git_info_exclude_path(project, root=None):
@@ -7835,6 +8011,10 @@ def cmd_new(project, args):
     if not os.path.exists(harness):
         with open(harness, "w", encoding="utf-8") as stream:
             stream.write(build_harness_draft(project, args.task))
+        base = _harness_base_info()
+        if _harness_base_status(base) == "stale":
+            print("警告：~/.claude/CLAUDE.md 自基底审定后已修改；请 conductor 判断是否同步 harness-base.md，再运行 baton harness base --approve。",
+                  file=sys.stderr)
     project.update_state(args.task, lambda s: s.update(task=args.task, harness_required=True))
     print(brief)
 
@@ -10215,6 +10395,16 @@ def cmd_doctor(project, args):
     ex = cfg["executor"]
     for path in legacy_claude_instruction_warnings(project):
         line("WARN", f"旧版 Baton 指令出现在 {path}：请改用 conductor.model、monitor 监督简报和 baton rule，不能派子 agent 代替 monitor")
+    base = _harness_base_info()
+    base_status = _harness_base_status(base)
+    if base_status == "approved":
+        line("OK", f"harness-base：已审定且源文件哈希一致（{base['path']}）")
+    elif base_status == "stale":
+        line("WARN", f"harness-base：源文件哈希不一致（{base['path']}）；请同步后运行 baton harness base --approve")
+    elif base_status == "pending":
+        line("WARN", f"harness-base：存在但仍待审定（{base['path']}）；请运行 baton harness base --approve")
+    else:
+        line("WARN", f"harness-base：不存在（{base['path']}）；请运行 baton harness base --init")
     codex = shutil.which("codex.exe" if os.name == "nt" else "codex")
     codex_level = "WARN" if ex.get("backend") == "hermes" and not codex else ("OK" if codex else "FAIL")
     line(codex_level, f"codex CLI：{codex or '未安装'}")
@@ -10477,6 +10667,10 @@ def main():
     harness_sub = s.add_subparsers(dest="harness_action", required=True)
     h = harness_sub.add_parser("approve", help="删除待审标记并登记审定内容哈希")
     h.add_argument("task")
+    h = harness_sub.add_parser("base", help="查看或管理用户级 harness-base.md")
+    h.add_argument("--init", action="store_true", help="从 ~/.claude/CLAUDE.md 生成待审初稿")
+    h.add_argument("--force", action="store_true", help="覆盖已有基底前先备份（只和 --init 一起使用）")
+    h.add_argument("--approve", action="store_true", help="删除待审标记并刷新源文件哈希")
     s = sub.add_parser("start", help="启动首轮（codex exec）")
     s.add_argument("task")
     for name, helptext in (("resume", "带指挥消息续跑（codex exec resume）"), ("steer", "停止当前轮并带纠偏消息续跑")):
@@ -10597,15 +10791,16 @@ def main():
             os.environ["BATON_HOME"] = os.path.abspath(expanded_home)
     root = resolve_cli_project_root(os.getcwd(), args.cmd, explicit_root=args.root)
     project = Project(root)
-    if args.cmd not in ("init", "quota", "doctor", "config", "statusline", "memory"):
+    harness_base = args.cmd == "harness" and args.harness_action == "base"
+    if args.cmd not in ("init", "quota", "doctor", "config", "statusline", "memory") and not harness_base:
         project.require_init()
-    if args.cmd not in ("init", "quota", "memory") and is_initialized(project.root):
+    if args.cmd not in ("init", "quota", "memory") and not harness_base and is_initialized(project.root):
         if not project.recorded_id():
             project.record_id()
         project.check_identity(warn_only=args.cmd in ("doctor", "config"))
     handler = {
         "init": cmd_init, "statusline": cmd_statusline, "new": cmd_new, "start": cmd_start,
-        "harness": cmd_harness_approve,
+        "harness": cmd_harness,
         "resume": cmd_resume, "steer": cmd_steer, "wait": cmd_wait, "monitor": cmd_monitor, "status": cmd_status,
         "close": cmd_close, "gc": cmd_gc,
         "supervised": cmd_supervised, "stop": cmd_stop, "checkpoint": cmd_checkpoint, "refs": cmd_refs,

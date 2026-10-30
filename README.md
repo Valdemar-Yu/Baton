@@ -85,7 +85,7 @@ hermes -p baton-exec-v2 auth remove openai-codex <根目录带进来的旧条目
 /baton 给 parser 加流式解析，保持接口兼容，tests/ 全部通过
 ```
 
-conductor 会先运行 `doctor`、`config`，再 `baton new <task>`。它写 `.baton/tasks/<task>/brief.md`（验收、允许/禁止路径、验证命令和 `baton-scope` 范围块），并审改 Baton 自动起草的 `.baton/tasks/<task>/harness.md`：只留这个项目的长期事实，删掉主会话专用的流程指令和上层目录的无关内容。审定后再启动：
+conductor 会先运行 `doctor`、`config`，再 `baton new <task>`。第一次使用或 doctor 提示基底缺失/过期时，先运行 `baton harness base --init`，把 `~/.claude/CLAUDE.md` 改写成只供 executor 使用的基底，再运行 `baton harness base --approve`；之后每个任务都会自动带入这份基底。它写 `.baton/tasks/<task>/brief.md`（验收、允许/禁止路径、验证命令和 `baton-scope` 范围块），并审改 Baton 自动起草的 `.baton/tasks/<task>/harness.md`：只留这个项目的长期事实，删掉主会话专用的流程指令和上层目录的无关内容。审定后再启动：
 
 ```bash
 baton harness approve <task>

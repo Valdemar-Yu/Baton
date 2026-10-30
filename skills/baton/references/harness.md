@@ -2,7 +2,9 @@
 
 `harness.md` 是 Baton 为单个任务生成、再由 conductor 审定的项目上下文。它会按 executor backend 渲染成原生指令文件，让 executor 只看到当前启动目录对应的长期项目事实。每个任务有自己的副本；skills 可以共享，但项目事实、记忆和会话不能跨任务混用。
 
-新建任务时，Baton 先生成自动初稿。初稿应从启动目录下 backend 会读取的项目指令文件摘录原文并标明出处：Hermes/Codex/Claude 使用的 `.hermes.md`、`HERMES.md`、`AGENTS.md` 链和 `CLAUDE.md`；同时加入记忆台账中 conductor 认可的 pinned 条目，以及项目验证命令。初稿顶部必须保留下面这一行；conductor 审阅后运行 `baton harness approve <task>`，命令会删除整行并记录审定时间和内容哈希。标记存在时不得 `baton start`：
+用户级 executor 基底位于 `$BATON_HOME/harness-base.md`（默认 `~/.baton/harness-base.md`）。它由 conductor 从 `~/.claude/CLAUDE.md` 一次改写，只保留 executor 会用到的稳定规则。第一次使用或 `baton doctor` 报告缺失/过期时，运行 `baton harness base --init` 生成待审初稿，删改主会话流程、写作 Skill 调用规则和无关文风后运行 `baton harness base --approve`；审定时会刷新源文件哈希。源文件之后变化时，重新判断是否同步基底，再运行 `--approve`。
+
+新建任务时，Baton 先生成自动初稿。初稿从启动目录到 git 根的项目指令链摘录原文并标明出处：`.hermes.md`、`HERMES.md`、`AGENTS.md`、项目内 `CLAUDE.md` 和 `.cursorrules`；如果用户级基底已审定，还会在「项目约定」最前面带入其正文。基底缺失或待审时只写提示，不会把 `~/.claude/CLAUDE.md` 原文带入。初稿同时加入记忆台账中 conductor 认可的 pinned 条目，以及项目验证命令。初稿顶部必须保留下面这一行；conductor 审阅后运行 `baton harness approve <task>`，命令会删除整行并记录审定时间和内容哈希。标记存在时不得 `baton start`：
 
 `<!-- BATON_HARNESS_REVIEW_REQUIRED（待审：conductor 审改后删除本行，才能 baton start） -->`
 

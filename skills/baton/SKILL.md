@@ -32,6 +32,8 @@ baton new <task>
 
 `doctor` 会检查 Codex、Ollama/记忆、台账、快照和 v1 指令告警。首次 init 会创建 `baton.json`；如果项目显式选择 Hermes backend，再按项目配置准备 `baton-exec-v2` profile。
 
+第一次使用（或 `doctor` 提示用户级基底缺失/过期）时，先运行 `baton harness base --init`，由 conductor 改写并运行 `baton harness base --approve`；之后每个任务的 harness 初稿都会自动带入已审定基底。
+
 `baton memory install` 只写 `$BATON_HOME/venv` 和本地 Ollama 模型，运行前告诉用户。只有 Hermes 登录和带 `--user-approved` 的命令需要用户在自己的终端执行。写 `.baton/tasks/<task>/brief.md` 时填完整验收、允许/禁止路径和验证命令，并包含范围块：
 
 ```markdown
@@ -134,6 +136,7 @@ baton rule <task> <curation-dossier> <verdict-file> --curation
 | `baton init [--migrate] [--upgrade-profile]` | 初始化、迁移 v1 配置、更新 profile |
 | `baton new <task>` | 生成简报模板 |
 | `baton harness approve <task>` | 审定 harness.md，删除待审标记并登记内容哈希 |
+| `baton harness base [--init\|--approve]` | 查看、生成或审定用户级 harness-base.md |
 | `baton start/resume/wait <task>` | 启动、按裁决续跑、后台等待 |
 | `baton status/diff <task>` | 监管快照和证据差异 |
 | `baton monitor <task> [dossier]` | 运行或重跑监督 monitor |
