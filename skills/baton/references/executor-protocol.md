@@ -4,7 +4,7 @@
 
 当前任务：`{{TASK}}`。Baton 目录：`{{BATON_DIR}}`。
 
-简报开头的 `baton-scope` JSON 是本任务的机器可读范围。`acceptance`、`frozen`、测试收集配置和测试命令引用的项目文件属于锁定级；依赖清单和 Makefile 属于监看级。锁定级改动、删除或新建会产生 `VIOLATION` 并停住本轮，监看级改动会在轮末列出。
+简报开头的 `baton-scope` JSON 是本任务的机器可读范围。`acceptance`、`frozen`、测试收集配置和测试命令引用的项目文件属于锁定级；依赖清单和 Makefile 属于监看级。可选的 `unfreeze` 只能列出原本由 test_command 自动冻结的已有测试文件精确路径，文件名必须符合 `test_*`、`*_test.*`、`*.spec.*` 或 `*.test.*`，不接受 glob、目录、缺失文件或测试配置文件；非空时启动必须带 `--user-approved` 并在 `/dev/tty` 逐字确认任务名。unfreeze 文件会记录在 state 和 charter.md、从 freeze manifest 排除，但删除测试、减少测试数量、跳过测试等 ALERT 仍适用。锁定级改动、删除或新建会产生 `VIOLATION` 并停住本轮，监看级改动会在轮末列出。
 
 ## 一、范围与安全
 

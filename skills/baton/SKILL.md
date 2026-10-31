@@ -38,13 +38,14 @@ baton new <task>
 
 ```markdown
 ```baton-scope
-{"allow":["src"],"deny":["data"],"acceptance":["tests"],"frozen":[],"verify":"auto"}
+{"allow":["src"],"deny":["data"],"acceptance":["tests"],"frozen":[],"unfreeze":[],"verify":"auto"}
 ```
 ```
 
 `allow` 是 executor 可以修改或新建的路径，新写的回归测试放这里；`deny` 禁止触碰。
 `acceptance` 只列已存在、必须通过的测试文件或 pytest node id，它们属于锁定级，不能修改、删除或新建；不要列源码或待写的新测试，没有现成验收测试时留空 `[]`。
 `frozen` 列其他需要锁定的已有文件；`verify` 为 `auto` 时运行配置的验证命令，`none` 时跳过自动验证。验收标准的文字描述写在简报正文。
+`unfreeze` 是可选的已有测试文件精确路径列表，文件名必须符合 `test_*`、`*_test.*`、`*.spec.*` 或 `*.test.*`，只能列出原本会被 `supervision.test_command` 自动冻结的测试文件；不接受 glob、目录、路径不存在或 conftest.py、pytest.ini、tox.ini、pyproject/setup.cfg 的 pytest 段、package.json 的 test 键等测试配置。非空时必须用 `baton start <task> --user-approved`，并在 `/dev/tty` 逐字确认任务名。解除冻结的文件会记入 state 和 charter.md、不会进入 freeze manifest，但删除测试、减少测试数量、跳过测试等 ALERT 仍然生效。
 每个任务的 `harness.md` 是经 conductor 审定的长期项目上下文；固定小节、初稿来源和审定规则见 [`references/harness.md`](references/harness.md)。
 `baton start` 前必须完成审阅并删除待审标记，brief 只负责本任务的目标、范围和验收条件。
 审阅完成后运行 `baton harness approve <task>`；该命令会删除待审标记、记录审定时间和内容哈希，随后才能 `baton start`。

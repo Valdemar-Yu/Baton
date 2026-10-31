@@ -8,3 +8,5 @@ __pycache__/
 
 # Local Windows validation evidence (summary and smoke are in the port report).
 test-results/
+.rsibench-local-registry.json
+.rsibench-local-runs/
