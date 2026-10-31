@@ -12,7 +12,28 @@ Baton v2 把这件事拆给三个角色，并把能机械检查的约束交给�
 
 这些取舍有两方面依据。council.skill [1] 在 SWE-bench Lite dev 的 23 个任务上报告，Sonnet 主 agent 引入多模型合议后，解决数从 8 升到 12 且没有回归，效果好于单一顾问。v2 因此让 monitor 默认用和 conductor 不同家族的模型，两边读同一份证据，各自的盲区不重合。记忆方面，Mem0 [2] 表明按需抽取和检索的记忆层相比把全部历史塞进上下文，p95 延迟降低 91%，token 成本降低九成以上。DolphinBench [3] 用真实任务考察记忆，指出最难的一步是 agent 意识到自己需要回忆，效果取决于模型、harness 和记忆系统的组合。Baton 据此每轮主动推送 10 条相关记忆和一个常驻块，执行者只拿到只读检索工具，写入由 monitor 提炼、conductor 核准。存储用 mem0 加本地 Ollama 嵌入，数据留在本机，台账为准，向量库随时可以重建。
 
-v2 由 v1 的 Baton 自举开发，带 239 个单元测试和 5 个连接真实 mem0、Ollama 与 MCP 的集成测试。真实 Hermes 执行者加真实 monitor 的端到端运行，从开工到 close 全流程通过。完整设计见 [docs/v2-design.md](docs/v2-design.md)。
+v2 由 v1 的 Baton 自举开发，现有 430 个单元测试和 5 个连接真实 mem0、Ollama 与 MCP 的集成测试。真实 Hermes 执行者加真实 monitor 的端到端运行，从开工到 close 全流程通过。完整设计见 [docs/v2-design.md](docs/v2-design.md)。
+
+## 2026 年 11 月更新
+
+这一版的改动都由 Baton 自己的任务完成，每个任务经过 monitor 监督简报、conductor 逐条裁决和全量测试后才合入。
+
+**executor 在你打开的目录里工作，只看到审定过的上下文。** 以前在 `~/vault/projA` 这样的子目录启动任务，Baton 会一路往上找到上层的 `baton.json`，executor 的工作目录、加载的 AGENTS.md 和记忆账都跟着落到上层项目，几个子项目的指令和记忆混在一起。现在项目根就是运行 `baton` 的目录，executor 也在这里工作。`baton new` 会起草一份 `harness.md`，作为 executor 能看到的全部项目上下文，conductor 审改后运行 `baton harness approve` 才能 start。每轮开始时它被渲染成后端原生的指令文件，Hermes 用 `.hermes.md`，Codex 用 `AGENTS.override.md`。每个任务有自己的 Hermes home 和 Codex home，全局 `~/.codex/AGENTS.md` 和上层目录的 AGENTS.md 都不会注入。这一点在嵌套项目上用 Codex 和 Hermes 各跑过真实任务，直接检查了两边的系统提示词。
+
+**用户级约定只维护一份。** 新增 `baton harness base`，把 `~/.claude/CLAUDE.md` 改写成只给 executor 用的 `$BATON_HOME/harness-base.md`，之后每份 harness 初稿自动带上它，不再整份抄全局指令。全局 CLAUDE.md 改动后，`baton new` 和 `baton doctor` 会提醒同步。
+
+**状态目录不再无限增长。** Codex task home 共享全局的 `cache`、`plugins`、`packages`，每个任务少下载约 80 MB。同一任务里只有最新的 report 卷宗保留代码副本。`baton close` 顺带清理事件日志、冻结副本和 task home，`baton gc` 新增 `--stale-days` 处理长期没动的任务，`--dry-run` 按类别列出能释放多少空间，`baton doctor` 在状态目录超过 2 GiB 时提醒。所有删除都限制在 `$BATON_HOME/projects/<id>/` 之内，遇到软链接只删链接本身。作者本机的状态目录从 1.6 GB 降到 1.1 GB，GPU 机器上一套 bench 状态从 11 GB 降到 1.3 GB，账本和卷宗校验全部通过。
+
+**流程更稳。**
+
+- `baton close --waive 原因 --user-approved` 给验证命令在环境里跑不通的任务留了出口，终审 ACCEPT 后的 IDLE 事件会提示 close。
+- 验收用例写成 `path::name` 时，冻结的是对应的测试文件。
+- 容量和额度错误只从错误事件和 stderr 判断，executor 读到含 "usage limit" 字样的文件不会再被当成额度耗尽。Hermes 的 overloaded、529、503 按容量错误重试。
+- 轮中检查同时只跑一个，失败后退避。验收缺口和记录滞后不会单独结束一轮，删测试或测试数下降的 breaking 告警照常生效。
+- scope 新增 `unfreeze`，可以在用户确认后放开指定的已有测试文件。
+- 卷宗证据带上本轮 `log.md` 新增的行。只有数字对不上的自述偏差记为 note，不再阻塞。
+
+**升级时要注意的事。** 拉取新版后先跑 `baton doctor`。升级前创建、没有 `harness.md` 的任务照旧运行，可以直接 resume。新任务需要先 `baton harness approve`。子目录如果要作为独立项目，先在里面 `baton init`。第一次使用时运行 `baton harness base --init`，改写后 `--approve`。`evaluation/` 下新增了 RSIBench 的本地 Codex 驱动和远程 relay，与 Baton 主程序相互独立。
 
 ## 三个角色
 
