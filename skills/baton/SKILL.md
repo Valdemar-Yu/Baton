@@ -146,18 +146,20 @@ baton rule <task> <curation-dossier> <verdict-file> --curation
 | `baton restore-frozen` / `baton amend` | 恢复冻结或提交用户核准的修正案 |
 | `baton preset list` / `baton preset use <名> [--task <任务>]` | 列出或切换 baton.json `presets` 里的执行者/monitor 预设；带 `--task` 时同步已启动任务的配置快照（该任务不能有运行中的一轮） |
 | `baton close <task>` | 验收通过后关闭任务；验证门槛因环境失败时可用 `--waive "原因" --user-approved` 豁免，或用 `--abandon "原因"` 放弃关闭 |
-| `baton close <task> --abandon "<原因>"` | 不再继续、也不会有 ACCEPT 终审的任务（如以 REPORT 结束）：账本记一条 abandon，任务 closed，清理卷宗代码 |
+| `baton close <task> --abandon "<原因>"` | 不再继续、也不会有 ACCEPT 终审的任务（如以 REPORT 结束）：账本记一条 abandon，任务 closed，并执行与 close 相同的卷宗代码、事件日志、frozen 文件副本和 task home 非会话内容清理 |
 | `baton memory install/verify/reindex` | 安装、校验、重建记忆索引 |
 
 ## 文件布局
 
 项目内：`.baton/tasks/<task>/brief.md` 是简报，`reports/` 是 executor 汇报，`reviews/` 是 verdict，`decisions/` 是请求，`runs/` 保存轮次事件，`log.md` 是修改日志，`supervision.md` 是监管记录；根目录 `baton.json` 保存项目模型和执行设置。
 
-项目外：`$BATON_HOME/projects/<project-id>/` 保存 state、影子仓库、回滚备份、卷宗、记忆台账和 qdrant；`$BATON_HOME/venv` 是 mem0/mcp 环境。Hermes profile 在 `~/.hermes/profiles/baton-exec-v2`，不写入项目 git。
+项目外：`$BATON_HOME/projects/<project-id>/` 保存 state、影子仓库、回滚备份、卷宗、记忆台账和 qdrant；`$BATON_HOME/venv` 是 mem0/mcp 环境。Hermes profile 在 `~/.hermes/profiles/baton-exec-v2`，不写入项目 git。任务级 Codex home 共享 `cache`、`plugins`、`packages` 软链接，Hermes 的可写 `skills`、`bin`、`cache` 保持任务私有。
 
 `BATON_HOME` 默认 `~/.baton`，可设到项目之外的其他磁盘。卷宗代码省略项目 git ignore 规则忽略的未跟踪文件；非 git 项目保持完整复制，省略统计写在 manifest 的 `code_omissions`。
-同一轮的检查卷宗只保留最新一份 `code/`；`close` 清理该任务所有卷宗的 `code/`，保留记录和账本。
-`baton gc --dry-run` 预览当前项目已关闭任务的清理数量和字节数，`baton gc` 执行清理。已清理卷宗不能重跑 monitor，回滚快照仍可使用。
+同一轮的检查卷宗只保留最新一份 `code/`；新的 `R` 加数字、`<task>-final`/`<task>-final-N` 或 `<task>-leg-N-violation` report 类卷宗会按创建顺序清理更早卷宗的 `code/`。`close` 和 `gc` 清理已 closed 任务的卷宗代码、事件日志、frozen 文件副本和 task home（保留会话、结果与审核元数据）。
+`baton gc --dry-run [--stale-days N]` 按类别预览文件数和字节数，`baton gc` 执行清理；默认清理 closed 任务及超过 14 天未更新的非运行任务。已清理卷宗不能重跑 monitor，回滚快照仍可使用。
+
+DONE/终审收尾：先用 `baton rule` 登记 ACCEPT，再运行 `baton close <task>`；close 成功会自动完成上述保留规则。没有终审时用 `--abandon`，它也会执行同样的清理。需要预览项目外状态释放量时，在 close 前或定期运行 `baton gc --dry-run`，长期未更新任务可加 `--stale-days N`。
 
 ## v2 配置示例
 

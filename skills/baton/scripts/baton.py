@@ -751,7 +751,7 @@ def dossier_id_for(project, task, leg, status):
     kind = dossier_type_for(status)
     if kind == "report":
         artifact = ((leg.get("result") or {}).get("artifact") if isinstance(leg.get("result"), dict) else "") or ""
-        match = re.search(r"(?:^|[^A-Za-z])(R\d{3})(?:[^0-9]|$)", os.path.basename(str(artifact)))
+        match = re.search(r"(?:^|[^A-Za-z])(R\d+)(?:[^0-9]|$)", os.path.basename(str(artifact)))
         if match:
             candidate = match.group(1)
         else:
@@ -916,29 +916,52 @@ def verify_dossier(project, dossier_id, require_code=False):
 
 
 def _seal_dossier(root):
-    for directory, _, names in os.walk(root, topdown=False):
+    # Never chmod through a symlink: dossier cleanup must not change a target
+    # outside the project state directory.
+    if os.path.islink(root):
+        return
+    for directory, _, names in os.walk(root, topdown=False, followlinks=False):
         for name in names:
+            path = os.path.join(directory, name)
+            if os.path.islink(path):
+                continue
             try:
-                os.chmod(os.path.join(directory, name), 0o444)
+                os.chmod(path, 0o444)
             except OSError:
                 pass
-        try:
-            os.chmod(directory, 0o555)
-        except OSError:
-            pass
+        if not os.path.islink(directory):
+            try:
+                os.chmod(directory, 0o555)
+            except OSError:
+                pass
 
 
 def _unseal_dossier(root):
-    for directory, _, names in os.walk(root, topdown=False):
+    # Never chmod through a symlink: dossier cleanup must not change a target
+    # outside the project state directory.
+    if os.path.islink(root):
+        return
+    for directory, _, names in os.walk(root, topdown=False, followlinks=False):
         for name in names:
+            path = os.path.join(directory, name)
+            if os.path.islink(path):
+                continue
             try:
-                os.chmod(os.path.join(directory, name), 0o644)
+                os.chmod(path, 0o644)
             except OSError:
                 pass
-        try:
-            os.chmod(directory, 0o755)
-        except OSError:
-            pass
+        if not os.path.islink(directory):
+            try:
+                os.chmod(directory, 0o755)
+            except OSError:
+                pass
+
+
+def _chmod_real(path, mode):
+    """Change mode only for a real path, never through a symlink."""
+    if os.path.islink(path):
+        return
+    os.chmod(path, mode)
 
 
 def _rmtree_retry(path, attempts=5, delay=0.5):
@@ -959,19 +982,48 @@ def _rmtree_retry(path, attempts=5, delay=0.5):
 def _prune_dossier_code(project, dossier_id, reason, dry_run=False):
     root = dossier_path(project, dossier_id)
     code = os.path.join(root, "code")
+    state_root = project.state_dir
+    if os.path.islink(root):
+        if not _retention_path_allowed(state_root, root):
+            raise RuntimeError("卷宗路径不在项目外状态目录内：" + root)
+        removed = {"files": 1, "bytes": os.lstat(root).st_size, "reason": reason, "at": now()}
+        if not dry_run:
+            os.unlink(root)
+        return removed
+    if not _retention_path_allowed(state_root, root):
+        raise RuntimeError("卷宗路径不在项目外状态目录内：" + root)
+    if os.path.islink(code):
+        if not _retention_path_allowed(state_root, code):
+            raise RuntimeError("卷宗 code 路径不在项目外状态目录内：" + code)
+        removed = {"files": 1, "bytes": os.lstat(code).st_size, "reason": reason, "at": now()}
+        if not dry_run:
+            manifest_path = os.path.join(root, "manifest.json")
+            incomplete = not os.path.exists(manifest_path)
+            manifest = {} if incomplete else dossier_manifest(project, dossier_id)
+            if not incomplete and not manifest.get("files"):
+                raise RuntimeError("卷宗缺少文件清单，不能清理：" + dossier_id)
+            _chmod_real(root, 0o755)
+            try:
+                os.unlink(code)
+                if not incomplete:
+                    manifest["code_pruned"] = removed
+                    _chmod_real(manifest_path, 0o644)
+                    write_json(manifest_path, manifest)
+            finally:
+                _seal_dossier(root)
+        return removed
     if not os.path.isdir(code):
         return None
-    if not os.path.realpath(code).startswith(os.path.realpath(root) + os.sep):
+    if not _retention_path_allowed(state_root, code):
         raise RuntimeError("卷宗 code 路径不在卷宗内：" + code)
-    sizes = [os.lstat(os.path.join(directory, name)).st_size
-             for directory, _, names in os.walk(code) for name in names]
+    sizes = [size for _, size in _retention_files(code)]
     removed = {"files": len(sizes), "bytes": sum(sizes), "reason": reason, "at": now()}
     if not dry_run:
         incomplete = not os.path.exists(os.path.join(root, "manifest.json"))
         manifest = {} if incomplete else dossier_manifest(project, dossier_id)
         if not incomplete and not manifest.get("files"):
             raise RuntimeError("卷宗缺少文件清单，不能清理：" + dossier_id)
-        os.chmod(root, 0o755)
+        _chmod_real(root, 0o755)
         try:
             _unseal_dossier(code)
             _rmtree_retry(code)
@@ -979,11 +1031,280 @@ def _prune_dossier_code(project, dossier_id, reason, dry_run=False):
             # keep the original inventory/hash so existing ledger bindings still resolve.
             if not incomplete:
                 manifest["code_pruned"] = removed
-                os.chmod(os.path.join(root, "manifest.json"), 0o644)
+                _chmod_real(os.path.join(root, "manifest.json"), 0o644)
                 write_json(os.path.join(root, "manifest.json"), manifest)
         finally:
             _seal_dossier(root)
     return removed
+
+
+def _retention_bucket():
+    return {"files": 0, "bytes": 0, "items": []}
+
+
+def _retention_add(bucket, path, size):
+    bucket["files"] += 1
+    bucket["bytes"] += int(size)
+    bucket["items"].append(path)
+
+
+def _retention_path_allowed(state_root, path):
+    """Check one deletion against project state, without resolving symlink targets."""
+    root = os.path.realpath(os.path.abspath(state_root))
+    path = os.path.abspath(path)
+    if os.path.islink(path):
+        parent = os.path.realpath(os.path.dirname(path))
+        candidate = os.path.join(parent, os.path.basename(path))
+        return candidate.startswith(root + os.sep)
+    real = os.path.realpath(path)
+    return real.startswith(root + os.sep)
+
+
+def _retention_files(root, predicate=None):
+    """Enumerate files without following symlinked directories."""
+    if not os.path.lexists(root):
+        return []
+    if os.path.islink(root):
+        return [(root, os.lstat(root).st_size)] if predicate is None or predicate(root) else []
+    found = []
+    for directory, dirs, names in os.walk(root, topdown=True, followlinks=False):
+        symlink_dirs = [name for name in dirs if os.path.islink(os.path.join(directory, name))]
+        dirs[:] = [name for name in dirs if name not in symlink_dirs]
+        for name in names:
+            path = os.path.join(directory, name)
+            if predicate is None or predicate(path):
+                try:
+                    found.append((path, os.lstat(path).st_size))
+                except OSError:
+                    pass
+        for name in symlink_dirs:
+            path = os.path.join(directory, name)
+            if predicate is None or predicate(path):
+                try:
+                    found.append((path, os.lstat(path).st_size))
+                except OSError:
+                    pass
+    return found
+
+
+def _retention_delete_files(root, state_root, predicate, dry_run=False):
+    bucket = _retention_bucket()
+    for path, size in _retention_files(root, predicate):
+        if not _retention_path_allowed(state_root, path):
+            raise RuntimeError("清理路径不在项目外状态目录内：" + path)
+        _retention_add(bucket, os.path.relpath(path, root), size)
+        if not dry_run:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+    return bucket
+
+
+def _record_dossier_retention(project, dossier_id, category, bucket, dry_run=False):
+    if dry_run or not bucket.get("files"):
+        return
+    root = dossier_path(project, dossier_id)
+    manifest_path = os.path.join(root, "manifest.json")
+    manifest = dossier_manifest(project, dossier_id)
+    if not isinstance(manifest, dict):
+        return
+    _chmod_real(root, 0o755)
+    try:
+        retention = manifest.setdefault("retention", {})
+        row = retention.setdefault(category, {"files": 0, "bytes": 0, "items": []})
+        row["files"] = int(row.get("files", 0)) + bucket["files"]
+        row["bytes"] = int(row.get("bytes", 0)) + bucket["bytes"]
+        row.setdefault("items", []).extend(bucket.get("items", []))
+        row["at"] = now()
+        _chmod_real(manifest_path, 0o644)
+        write_json(manifest_path, manifest)
+    finally:
+        _seal_dossier(root)
+
+
+def _cleanup_dossier_out(project, dossier_id, dry_run=False):
+    out = dossier_out_dir(project, dossier_id)
+    if os.path.islink(out):
+        if not _retention_path_allowed(project.state_dir, out):
+            raise RuntimeError("卷宗输出目录不在项目外状态目录内：" + out)
+        bucket = _retention_bucket()
+        _retention_add(bucket, os.path.basename(out), os.lstat(out).st_size)
+        if not dry_run:
+            os.unlink(out)
+        _record_dossier_retention(project, dossier_id, "events", bucket, dry_run=dry_run)
+        return bucket
+    if os.path.lexists(out) and not _retention_path_allowed(project.state_dir, out):
+        raise RuntimeError("卷宗输出目录不在项目外状态目录内：" + out)
+    bucket = _retention_delete_files(
+        out, project.state_dir, lambda path: path.endswith(".events.jsonl") or path.endswith(".stdout.json"),
+        dry_run=dry_run)
+    _record_dossier_retention(project, dossier_id, "events", bucket, dry_run=dry_run)
+    return bucket
+
+
+def _cleanup_frozen_task(project, task, dry_run=False):
+    root = freeze_dir(project, task)
+    if os.path.islink(root):
+        if not _retention_path_allowed(project.state_dir, root):
+            raise RuntimeError("冻结任务目录不在项目外状态目录内：" + root)
+        bucket = _retention_bucket()
+        _retention_add(bucket, os.path.basename(root), os.lstat(root).st_size)
+        if not dry_run:
+            os.unlink(root)
+        return bucket
+    files_root = os.path.join(root, "files")
+    if os.path.islink(files_root):
+        if not _retention_path_allowed(project.state_dir, files_root):
+            raise RuntimeError("冻结文件目录不在项目外状态目录内：" + files_root)
+        bucket = _retention_bucket()
+        _retention_add(bucket, os.path.basename(files_root), os.lstat(files_root).st_size)
+        if not dry_run:
+            os.unlink(files_root)
+        return bucket
+    if os.path.lexists(files_root) and not _retention_path_allowed(project.state_dir, files_root):
+        raise RuntimeError("冻结文件目录不在项目外状态目录内：" + files_root)
+    bucket = _retention_delete_files(files_root, project.state_dir, lambda path: True, dry_run=dry_run)
+    if not dry_run and os.path.isdir(files_root):
+        for directory, dirs, _ in os.walk(files_root, topdown=False):
+            for name in dirs:
+                path = os.path.join(directory, name)
+                if os.path.isdir(path) and not os.path.islink(path):
+                    try:
+                        os.rmdir(path)
+                    except OSError:
+                        pass
+    return bucket
+
+
+def _cleanup_task_home(home, kind, state_root, dry_run=False):
+    bucket = _retention_bucket()
+    if not os.path.lexists(home):
+        return bucket
+    if not _retention_path_allowed(state_root, home):
+        raise RuntimeError("task home 路径不在项目外状态目录内：" + home)
+    if os.path.islink(home):
+        size = os.lstat(home).st_size
+        _retention_add(bucket, os.path.basename(home), size)
+        if not dry_run:
+            os.unlink(home)
+        return bucket
+
+    def keep(rel):
+        parts = rel.replace(os.sep, "/").split("/")
+        name = parts[-1]
+        if "sessions" in parts:
+            return True
+        return kind == "hermes" and name.startswith("state.db")
+
+    entries = []
+    for directory, dirs, names in os.walk(home, topdown=True, followlinks=False):
+        rel_dir = os.path.relpath(directory, home)
+        if rel_dir == ".":
+            rel_dir = ""
+        kept_dirs = []
+        for name in list(dirs):
+            path = os.path.join(directory, name)
+            rel = os.path.join(rel_dir, name) if rel_dir else name
+            if keep(rel):
+                kept_dirs.append(name)
+                continue
+            if os.path.islink(path):
+                entries.append((path, os.lstat(path).st_size))
+            else:
+                # Contents are handled by os.walk; remove the directory after its files.
+                pass
+        dirs[:] = kept_dirs + [name for name in dirs if name not in kept_dirs and not os.path.islink(os.path.join(directory, name))]
+        for name in names:
+            path = os.path.join(directory, name)
+            rel = os.path.join(rel_dir, name) if rel_dir else name
+            if not keep(rel):
+                try:
+                    entries.append((path, os.lstat(path).st_size))
+                except OSError:
+                    pass
+    # Symlinked directories were removed from traversal above; regular directories are removed after files.
+    for path, size in entries:
+        if not _retention_path_allowed(state_root, path):
+            raise RuntimeError("task home 清理路径不在项目外状态目录内：" + path)
+        _retention_add(bucket, os.path.relpath(path, home), size)
+        if not dry_run:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+    if not dry_run:
+        for directory, dirs, _ in os.walk(home, topdown=False, followlinks=False):
+            for name in dirs:
+                path = os.path.join(directory, name)
+                if os.path.islink(path):
+                    continue
+                rel = os.path.relpath(path, home)
+                if keep(rel):
+                    continue
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    pass
+    return bucket
+
+
+def _task_is_running(st):
+    if not isinstance(st, dict):
+        return False
+    if st.get("status") == "running":
+        return True
+    for leg in st.get("legs", []):
+        if leg.get("status") in {"running", "starting"} or codex_alive(leg):
+            return True
+        for value in (leg.get("monitor"), leg.get("monitor_check")):
+            if isinstance(value, dict) and value.get("status") in {"running", "starting"}:
+                return True
+    return isinstance(st.get("curation_monitor"), dict) and st["curation_monitor"].get("status") in {"running", "starting"}
+
+
+def _task_last_updated(project, task, st):
+    for key in ("updated_at", "last_updated_at", "last_update_at", "updated"):
+        value = st.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    try:
+        return os.path.getmtime(project.state_path(task))
+    except OSError:
+        return 0.0
+
+
+def _report_dossier_ids(project, task, st=None):
+    result = []
+    known = set(task_dossiers(project, task, st or {}) if st is not None else [])
+    base = os.path.join(project.state_dir, "dossiers")
+    if not os.path.isdir(base):
+        return result
+    for ident in os.listdir(base):
+        root = os.path.join(base, ident)
+        if ident.endswith(".out") or not os.path.isdir(root):
+            continue
+        manifest = dossier_manifest(project, ident)
+        if manifest.get("task") != task and ident not in known:
+            continue
+        kind = manifest.get("type")
+        named_report = re.fullmatch(r"R\d+", ident) or re.fullmatch(
+            re.escape(task) + r"-final(?:-\d+)?", ident) or re.fullmatch(
+            re.escape(task) + r"-leg-\d+-violation", ident)
+        if named_report and (kind in {"report", "final", "violation"} or kind is None):
+            result.append((ident, float(manifest.get("created_at") or os.path.getmtime(root))))
+    return sorted(result, key=lambda item: (item[1], item[0]))
+
+
+def _prune_superseded_report_dossiers(project, task, current_id):
+    rows = _report_dossier_ids(project, task)
+    current_time = next((created for ident, created in rows if ident == current_id), now())
+    for ident, created in rows:
+        if ident == current_id or created > current_time or (created == current_time and ident > current_id):
+            continue
+        result = _prune_dossier_code(project, ident, "被 %s 取代" % current_id)
+        if result is not None:
+            print(f"已清理被取代卷宗 {ident}/code/：{result['files']} 个文件，{result['bytes']} 字节")
 
 
 def task_dossiers(project, task, st):
@@ -1013,32 +1334,112 @@ def task_dossiers(project, task, st):
     return found
 
 
-def prune_closed_task(project, task, dry_run=False):
+def _cleanup_closed_task(project, task, dry_run=False):
     st = project.read_state(task)
-    if not isinstance(st, dict):
-        return []
-    if st.get("status") != "closed":
-        return []
-    removed = []
+    result = {"dossier_code": _retention_bucket(), "events": _retention_bucket(),
+              "frozen": _retention_bucket(), "task_home": _retention_bucket(),
+              "code_results": []}
+    if not isinstance(st, dict) or st.get("status") != "closed":
+        return result
     for ident in task_dossiers(project, task, st):
-        result = _prune_dossier_code(project, ident, "任务已 closed", dry_run=dry_run)
-        if result is not None:
-            removed.append(result)
-            print(f"{'将清理' if dry_run else '已清理'} {ident}/code/：{result['files']} 个文件，{result['bytes']} 字节")
-    return removed
+        code = _prune_dossier_code(project, ident, "任务已 closed", dry_run=dry_run)
+        if code is not None:
+            result["code_results"].append(code)
+            result["dossier_code"]["files"] += code["files"]
+            result["dossier_code"]["bytes"] += code["bytes"]
+            result["dossier_code"]["items"].append(ident + "/code/")
+            print(f"{'将清理' if dry_run else '已清理'} {ident}/code/：{code['files']} 个文件，{code['bytes']} 字节")
+        events = _cleanup_dossier_out(project, ident, dry_run=dry_run)
+        result["events"]["files"] += events["files"]
+        result["events"]["bytes"] += events["bytes"]
+        result["events"]["items"].extend(ident + ".out/" + item for item in events.get("items", []))
+    frozen = _cleanup_frozen_task(project, task, dry_run=dry_run)
+    result["frozen"].update(frozen)
+    for kind, home in (("codex", st.get("codex_home") or codex_task_home(project, task)),
+                       ("hermes", st.get("hermes_home") or hermes_task_home(project, task))):
+        home_stats = _cleanup_task_home(home, kind, project.state_dir, dry_run=dry_run)
+        result["task_home"]["files"] += home_stats["files"]
+        result["task_home"]["bytes"] += home_stats["bytes"]
+        result["task_home"]["items"].extend(kind + "/" + item for item in home_stats.get("items", []))
+    if not dry_run:
+        categories = {key: value for key, value in result.items()
+                      if key in {"dossier_code", "events", "frozen", "task_home"}}
+        if any(value["files"] for value in categories.values()):
+            summary = {key: {"files": value["files"], "bytes": value["bytes"], "at": now()}
+                       for key, value in categories.items()}
+            project.update_state(task, lambda state: state.setdefault("retention", []).append(summary))
+    return result
+
+
+def prune_closed_task(project, task, dry_run=False):
+    """Prune a closed task and return the legacy list of dossier-code records."""
+    return _cleanup_closed_task(project, task, dry_run=dry_run)["code_results"]
+
+
+def _cleanup_stale_task(project, task, st, dry_run=False):
+    result = {"dossier_code": _retention_bucket(), "events": _retention_bucket(),
+              "frozen": _retention_bucket(), "task_home": _retention_bucket(), "code_results": []}
+    rows = _report_dossier_ids(project, task, st=st)
+    if rows:
+        latest = rows[-1][0]
+        for ident, _ in rows[:-1]:
+            code = _prune_dossier_code(project, ident, "被 %s 取代（stale）" % latest, dry_run=dry_run)
+            if code is not None:
+                result["code_results"].append(code)
+                result["dossier_code"]["files"] += code["files"]
+                result["dossier_code"]["bytes"] += code["bytes"]
+                result["dossier_code"]["items"].append(ident + "/code/")
+    for ident in task_dossiers(project, task, st):
+        manifest = dossier_manifest(project, ident)
+        if manifest.get("type") != "check":
+            continue
+        events = _cleanup_dossier_out(project, ident, dry_run=dry_run)
+        result["events"]["files"] += events["files"]
+        result["events"]["bytes"] += events["bytes"]
+        result["events"]["items"].extend(ident + ".out/" + item for item in events.get("items", []))
+    return result
+
+
+def _merge_retention_stats(target, source):
+    for category in ("dossier_code", "events", "frozen", "task_home"):
+        target[category]["files"] += source[category]["files"]
+        target[category]["bytes"] += source[category]["bytes"]
+        target[category]["items"].extend(source[category].get("items", []))
+    target["code_results"].extend(source.get("code_results", []))
 
 
 def cmd_gc(project, args):
     project.require_init()
-    removed = []
+    stats = {"dossier_code": _retention_bucket(), "events": _retention_bucket(),
+             "frozen": _retention_bucket(), "task_home": _retention_bucket(), "code_results": []}
     skipped_drafts = 0
+    stale_value = getattr(args, "stale_days", 14)
+    stale_days = 14 if stale_value is None else int(stale_value)
+    if stale_days < 0:
+        die("--stale-days 不能是负数")
     for task in project.tasks():
-        if not isinstance(project.read_state(task), dict):
+        st = project.read_state(task)
+        if not isinstance(st, dict):
             skipped_drafts += 1
             continue
-        removed.extend(prune_closed_task(project, task, dry_run=args.dry_run))
-    print(f"{'将清理' if args.dry_run else '已清理'} {len(removed)} 份卷宗代码，"
+        if st.get("status") == "closed":
+            _merge_retention_stats(stats, _cleanup_closed_task(project, task, dry_run=args.dry_run))
+        elif (st.get("status") in {"done", "idle", "failed", "blocked"}
+              and not _task_is_running(st)
+              and now() - _task_last_updated(project, task, st) > stale_days * 86400):
+            _merge_retention_stats(stats, _cleanup_stale_task(project, task, st, dry_run=args.dry_run))
+    label = "将清理" if args.dry_run else "已清理"
+    names = (("dossier_code", "卷宗代码"), ("events", "事件日志"),
+             ("frozen", "frozen 文件"), ("task_home", "task home"))
+    for key, title in names:
+        item = stats[key]
+        print(f"{label} {title}：{item['files']} 个文件，{item['bytes']} 字节")
+    removed = stats["code_results"]
+    print(f"{label} {len(removed)} 份卷宗代码，"
           f"{sum(item['files'] for item in removed)} 个文件，{sum(item['bytes'] for item in removed)} 字节")
+    total_files = sum(stats[key]["files"] for key, _ in names)
+    total_bytes = sum(stats[key]["bytes"] for key, _ in names)
+    print(f"{label}合计：{total_files} 个文件，{total_bytes} 字节")
     if skipped_drafts:
         print(f"跳过 {skipped_drafts} 个 draft 任务（尚未启动）")
 
@@ -1265,6 +1666,13 @@ def build_dossier(project, task, st, leg, status):
         "type": kind, "code_omissions": omissions, "files": files,
         "total_sha256": _dossier_total(files), "created_at": now()})
     _seal_dossier(root)
+    # Named report artifacts are replaceable while a task is still open. Legacy
+    # unnamed report/final dossiers keep their code until close/gc.
+    named_current = re.fullmatch(r"R\d+", dossier_id or "") or re.fullmatch(
+        re.escape(task) + r"-final(?:-\d+)?", dossier_id or "") or re.fullmatch(
+        re.escape(task) + r"-leg-\d+-violation", dossier_id or "")
+    if named_current and kind in {"report", "final", "violation"}:
+        _prune_superseded_report_dossiers(project, task, dossier_id)
     return dossier_id
 
 
@@ -2749,7 +3157,7 @@ def _verdict_for_dossier(project, task, dossier_id):
 
 def _revision_key(project, dossier_id):
     report = read_text(os.path.join(dossier_path(project, dossier_id), "report.html"))
-    match = re.search(r"修订自\s*(R\d{3})", report or "")
+    match = re.search(r"修订自\s*(R\d+)", report or "")
     return match.group(1) if match else None
 
 
@@ -6980,11 +7388,19 @@ def prepare_task_codex_home(project, task, target=None):
             except OSError:
                 pass
     if os.path.isdir(source) and os.path.realpath(source) != os.path.realpath(target):
+        shared_dirs = {"cache", "plugins", "packages"}
         for name in sorted(os.listdir(source)):
             if name in excluded:
                 continue
             src = os.path.join(source, name)
             dst = os.path.join(target, name)
+            if name in shared_dirs and os.path.isdir(src) and not os.path.lexists(dst):
+                try:
+                    os.symlink(src, dst)
+                    inherited.append(name)
+                except OSError:
+                    pass
+                continue
             if name == "skills" and os.path.isdir(src) and not os.path.lexists(dst):
                 try:
                     os.symlink(src, dst)
@@ -7717,7 +8133,11 @@ def prepare_hermes_profile(project, cfg, upgrade_profile=False):
 
 
 def prepare_task_hermes_profile(project, task, cfg):
-    """Create a task-local Hermes profile without copying rotating credentials."""
+    """Create a task-local Hermes profile without copying rotating credentials.
+
+    Hermes writes its skills manifest, managed binaries, and media/model caches at
+    runtime, so those directories stay task-local instead of becoming shared links.
+    """
     home = hermes_task_home(project, task, cfg)
     profile = hermes_profile_dir(cfg, project=project, task=task)
     os.makedirs(profile, exist_ok=True)
@@ -7894,6 +8314,36 @@ def _du(path):
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
     return "?"
+
+
+def _state_dir_size(path):
+    """Sum project-external state bytes without following symlinks."""
+    total = 0
+    if not os.path.isdir(path):
+        return 0
+    for directory, dirs, names in os.walk(path, topdown=True, followlinks=False):
+        symlink_dirs = [name for name in dirs if os.path.islink(os.path.join(directory, name))]
+        dirs[:] = [name for name in dirs if name not in symlink_dirs]
+        for name in names:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except OSError:
+                pass
+        for name in symlink_dirs:
+            link = os.path.join(directory, name)
+            try:
+                total += os.lstat(link).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _human_bytes(value):
+    value = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024.0
 
 
 def print_snapshot_scope(project, max_depth=4):
@@ -10392,6 +10842,12 @@ def cmd_doctor(project, args):
     except ConfigError as e:
         line("FAIL", str(e))
         sys.exit(1)
+    state_bytes = _state_dir_size(project.state_dir)
+    state_size = _human_bytes(state_bytes)
+    if state_bytes > 2 * 1024 ** 3:
+        line("WARN", f"项目外状态目录：{state_size}，超过 2 GiB；可运行 baton gc --dry-run")
+    else:
+        line("OK", f"项目外状态目录：{state_size}")
     ex = cfg["executor"]
     for path in legacy_claude_instruction_warnings(project):
         line("WARN", f"旧版 Baton 指令出现在 {path}：请改用 conductor.model、monitor 监督简报和 baton rule，不能派子 agent 代替 monitor")
@@ -10715,8 +11171,10 @@ def main():
                    help="验证门槛失败时，写明原因并配合 --user-approved 豁免；验证已通过时忽略")
     s.add_argument("--user-approved", action="store_true",
                    help="核准 --waive；TTY 下逐字确认任务名，delegate_to_conductor 时由 conductor 代办")
-    s = sub.add_parser("gc", help="清理已 closed 任务的卷宗代码，保留记录和账本")
+    s = sub.add_parser("gc", help="清理已 closed 或长期未更新任务的状态文件，保留记录和账本")
     s.add_argument("--dry-run", action="store_true", help="只列出将清理的卷宗、文件数和字节数")
+    s.add_argument("--stale-days", type=int, default=14,
+                   help="done/idle/failed/blocked 任务超过多少天未更新后清理（默认 14）")
     s = sub.add_parser("supervised", help="记录一次监管结论并重置计时")
     s.add_argument("task")
     s.add_argument("--verdict", choices=["on_track", "drifting", "breaking"])

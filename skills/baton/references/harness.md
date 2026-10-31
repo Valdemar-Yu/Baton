@@ -1,6 +1,6 @@
 # 任务 harness.md 约定
 
-`harness.md` 是 Baton 为单个任务生成、再由 conductor 审定的项目上下文。它会按 executor backend 渲染成原生指令文件，让 executor 只看到当前启动目录对应的长期项目事实。每个任务有自己的副本；skills 可以共享，但项目事实、记忆和会话不能跨任务混用。
+`harness.md` 是 Baton 为单个任务生成、再由 conductor 审定的项目上下文。它会按 executor backend 渲染成原生指令文件，让 executor 只看到当前启动目录对应的长期项目事实。每个任务有自己的副本；Codex 的 cache/plugins/packages 软链接共享，Hermes 的 skills/bin/cache 保持任务私有，因为运行时会写入这些目录；项目事实、记忆和会话不能跨任务混用。
 
 用户级 executor 基底位于 `$BATON_HOME/harness-base.md`（默认 `~/.baton/harness-base.md`）。它由 conductor 从 `~/.claude/CLAUDE.md` 一次改写，只保留 executor 会用到的稳定规则。第一次使用或 `baton doctor` 报告缺失/过期时，运行 `baton harness base --init` 生成待审初稿，删改主会话流程、写作 Skill 调用规则和无关文风后运行 `baton harness base --approve`；审定时会刷新源文件哈希。源文件之后变化时，重新判断是否同步基底，再运行 `--approve`。
 

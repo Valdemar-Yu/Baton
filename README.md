@@ -93,7 +93,7 @@ baton start <task>
 baton wait <task> &
 ```
 
-`harness approve` 记录内容哈希；harness 没审定、审定后又被改过，`start` 都会拒绝。executor 拿到的项目指令只来自这份 harness：Hermes 渲染成启动目录下的 `.hermes.md`，Codex 渲染成 `AGENTS.override.md`，两者都写进 `.git/info/exclude`，任务 close 时清理。每个任务有独立的 Hermes home 和 Codex home，会话、记忆不跨任务共享，skills 共享。
+`harness approve` 记录内容哈希；harness 没审定、审定后又被改过，`start` 都会拒绝。executor 拿到的项目指令只来自这份 harness：Hermes 渲染成启动目录下的 `.hermes.md`，Codex 渲染成 `AGENTS.override.md`，两者都写进 `.git/info/exclude`，任务 close 时清理。每个任务有独立的 Hermes home 和 Codex home，会话、记忆不跨任务共享；Codex 的 `cache`、`plugins`、`packages` 通过软链接共享，`sessions` 保持任务私有。Hermes 的 `skills`、`bin`、`cache` 会被运行时写入，保持任务私有；只有 profile 的 `auth.json` 按现有规则指向共享凭据。
 
 项目根就是运行 `baton` 的目录。当前目录没有 `baton.json`、上层目录有时，`new`/`start` 会拒绝，提示先在当前目录 `baton init`（或显式传 `--root`），避免子目录任务落到上层项目、带上上层的 AGENTS.md 和记忆。executor 的工作目录也是这个目录。
 
@@ -109,17 +109,18 @@ executor 每次小修改追加 `.baton/log.md`；大修改写 `.baton/reports/R*
 卷宗的 `code/` 从影子快照复制，省略项目自身 git ignore 规则忽略的未跟踪文件；项目跟踪的文件仍保留。
 非 git 项目保持完整复制。`manifest.json` 中的 `code_omissions` 记录省略文件数、字节数和原因。
 同一任务同一轮的轮中检查只保留最新检查卷宗的 `code/`，每次新检查会删除旧检查的代码副本。
-`baton close` 删除该任务所有卷宗的代码副本；其余记录、原始文件清单和账本保留，manifest 另记 `code_pruned`。
-已清理的卷宗可核验保留的记录，但不能重跑 monitor。影子仓库的回滚快照保留。
+`baton close` 删除该任务所有卷宗的代码副本，并清理卷宗输出中的 `*.events.jsonl`、`*.stdout.json`、冻结文件副本和 task home 中除会话记录外的内容；结果 JSON、stderr/runner 日志、冻结 manifest、Codex `sessions/`、Hermes `sessions/` 与 `state.db*` 保留。卷宗 manifest 和任务 state 记录 `code_pruned`、retention 清理摘要，账本与校验仍可核对。
+新建带 `R` 加数字、`<task>-final`/`<task>-final-N` 或 `<task>-leg-N-violation` 名称的 report 类卷宗时，同任务更早的这些卷宗只保留记录，最新卷宗保留 `code/`；同一轮检查卷宗仍只保留最新代码副本。已清理的卷宗可核验保留的记录，但不能重跑 monitor。影子仓库的回滚快照保留。
 
-清理当前项目中此前已关闭任务的卷宗代码：
+清理当前项目中此前已关闭任务的卷宗、事件日志、冻结副本和 task home：
 
 ```bash
 baton gc --dry-run
 baton gc
+baton gc --stale-days 14 --dry-run
 ```
 
-命令打印卷宗数量、文件数和字节数；未关闭任务的卷宗保留。
+`--dry-run` 按卷宗代码、事件日志、frozen、task home 分别打印文件数和字节数，并给出合计；实际运行打印释放量。`--stale-days N` 对超过 N 天未更新且非运行中的 done/idle/failed/blocked 任务清理旧 report 代码和检查卷宗事件日志，默认 14 天；运行中的任务跳过。未关闭且未超期的任务保留。
 
 ## 从 v1 迁移
 
