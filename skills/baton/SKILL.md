@@ -34,6 +34,25 @@ baton new <task>
 
 第一次使用（或 `doctor` 提示用户级基底缺失/过期）时，先运行 `baton harness base --init`，由 conductor 改写并运行 `baton harness base --approve`；之后每个任务的 harness 初稿都会自动带入已审定基底。
 
+### macOS 上经 Hermes 调用 Codex
+
+macOS 项目若要让 executor 通过 Hermes 使用 Codex，在 `baton.json` 写明 provider、profile、model 和 Hermes 支持的 effort：
+
+```json
+{
+  "executor": {
+    "backend": "hermes",
+    "provider": "openai-codex",
+    "hermes_profile": "baton-exec-v2",
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "max",
+    "sandbox_exec": true
+  }
+}
+```
+
+然后在用户终端运行 `baton init --upgrade-profile` 刷新 profile，用 `hermes -p baton-exec-v2 auth` 登录并选择 `openai-codex`，最后用 `baton doctor` 核对 provider、profile 凭据和 `sandbox-exec`。Hermes 不支持 Codex CLI 的 `ultra`、`service_tier`/Fast mode 透传；使用 `max`，doctor 会报告不支持的配置项。macOS 的 start、resume 和 escalation 都从同一份 executor 配置生成 Hermes argv。
+
 `baton memory install` 只写 `$BATON_HOME/venv` 和本地 Ollama 模型，运行前告诉用户。只有 Hermes 登录和带 `--user-approved` 的命令需要用户在自己的终端执行。写 `.baton/tasks/<task>/brief.md` 时填完整验收、允许/禁止路径和验证命令，并包含范围块：
 
 ```markdown

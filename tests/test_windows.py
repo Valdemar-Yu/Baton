@@ -71,7 +71,7 @@ class WindowsTests(unittest.TestCase):
                 self.assertFalse(baton.doctor_memory(project, project.config, lambda *m: messages.append(m)))
             self.assertEqual(messages[0][0], 'WARN')
             baton.write_json(project.baton_config_path, {'executor': {'backend': 'hermes'}})
-            with self.assertRaisesRegex(baton.ConfigError, 'unsupported on Windows'):
+            with self.assertRaisesRegex(baton.ConfigError, 'sandbox_exec.*false'):
                 baton.cmd_start(project, Namespace(task='unused'))
             out = io.StringIO()
             with mock.patch.object(baton, 'safe_quota', return_value=None), contextlib.redirect_stdout(out):
@@ -79,6 +79,14 @@ class WindowsTests(unittest.TestCase):
                     baton.cmd_doctor(project, Namespace(monitor_probe=False))
             self.assertEqual(stopped.exception.code, 1)
             self.assertIn('[FAIL] ' + baton.WINDOWS_HERMES_ERROR, out.getvalue())
+            baton.write_json(project.baton_config_path,
+                             {'executor': {'backend': 'hermes', 'sandbox_exec': False}})
+            baton.require_supported_executor(project.config)
+            out = io.StringIO()
+            with mock.patch.object(baton, 'safe_quota', return_value=None), contextlib.redirect_stdout(out):
+                with self.assertRaises(SystemExit):
+                    baton.cmd_doctor(project, Namespace(monitor_probe=False))
+            self.assertNotIn('[FAIL] ' + baton.WINDOWS_HERMES_ERROR, out.getvalue())
 
     def test_shadow_repository_external_git_dir_and_contaminated_env(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -191,6 +199,13 @@ class WindowsTests(unittest.TestCase):
         with mock.patch.object(win, "powershell_json", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "live PID"):
                 win.proc_cmdline(os.getpid())
+
+    def test_cim_access_denied_falls_back_to_native_process_queries(self):
+        denied = RuntimeError("Windows process query failed: PermissionDenied HRESULT 0x80041003")
+        with mock.patch.object(win, "powershell_json", side_effect=denied):
+            self.assertIn("python", win.proc_cmdline(os.getpid()).lower())
+            self.assertIn(os.getpid(), win.process_tree(os.getpid()))
+            self.assertIsNotNone(win._process_creation_time(os.getpid()))
 
     def test_lock_exclusivity_across_processes(self):
         with tempfile.TemporaryDirectory() as directory:

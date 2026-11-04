@@ -98,6 +98,32 @@ hermes -p baton-exec-v2 auth remove openai-codex <根目录带进来的旧条目
 
 `baton init --upgrade-profile` 只在确认要覆盖 profile 的 SOUL.md/config.yaml 时使用。运行 `baton doctor` 检查 Hermes、Ollama、台账和 monitor 隔离。
 
+### macOS：让 executor 经 Hermes 调用 Codex
+
+在 macOS 上把项目的 executor 明确设为 Hermes，并让 Hermes 使用 `openai-codex` provider；`reasoning_effort` 使用 Hermes 支持的值，例如 `max`，不要把 Codex CLI 专用的 `ultra` 原样传给 Hermes：
+
+```json
+{
+  "executor": {
+    "backend": "hermes",
+    "provider": "openai-codex",
+    "hermes_profile": "baton-exec-v2",
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "max",
+    "sandbox_exec": true
+  }
+}
+```
+
+配置后刷新 profile 并在自己的终端登录：
+
+```bash
+baton init --upgrade-profile
+hermes -p baton-exec-v2 auth
+```
+
+在 Hermes 的认证流程中选择 `openai-codex`，然后运行 `baton doctor`；输出应显示 Hermes provider、profile、凭据和 `sandbox-exec` 检查。Hermes 不接收 Codex 的 `service_tier`/Fast mode 参数，`doctor` 会明确提示这两个配置不会传入；start、resume 和升级仍会沿用 Hermes 的 provider、model 和 effort。长 prompt 通过 argv 直接传给 macOS 上的 Hermes，不经过 shell 重新解析。
+
 ## 一次任务
 
 在目标项目里由 Claude 主会话执行：

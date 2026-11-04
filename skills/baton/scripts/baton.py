@@ -83,6 +83,37 @@ EXECUTOR_BACKENDS = {"codex", "hermes"}
 BATON_GITIGNORE = ["runs/", "*.lock", "statusline-saved.json", "tasks/*/state.json", "rollback-backup/", "project-id"]
 _DETACHED_RUNNERS = []
 STARTUP_GRACE_SECONDS = 30
+
+
+def claude_config_dir():
+    """Claude Code's user configuration directory; CLAUDE_CONFIG_DIR overrides ~/.claude."""
+    return os.path.abspath(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"))
+
+
+HERMES_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+HERMES_REASONING_EFFORT_ALIASES = {"ultra": "max"}
+
+
+def hermes_reasoning_effort(value):
+    """Return an effort accepted by Hermes, mapping Codex-only aliases explicitly."""
+    raw = str(value or "").strip().lower()
+    if raw in HERMES_REASONING_EFFORTS:
+        return raw
+    return HERMES_REASONING_EFFORT_ALIASES.get(raw)
+
+
+def hermes_effort_diagnostic(field, value):
+    """Return a doctor diagnostic for an executor effort Hermes cannot receive verbatim."""
+    raw = str(value or "").strip().lower()
+    if raw in HERMES_REASONING_EFFORTS:
+        return None
+    mapped = HERMES_REASONING_EFFORT_ALIASES.get(raw)
+    supported = ", ".join(HERMES_REASONING_EFFORTS)
+    if mapped:
+        return ("WARN", f"{field}={raw} 不是 Hermes/openai-codex 的原生值，启动时明确映射为 {mapped}；可选值：{supported}")
+    return ("FAIL", f"{field}={raw or '空'} 不是 Hermes/openai-codex 支持的值；可选值：{supported}")
+
+
 LEG_END_EVENTS = {
     "done": "DONE", "decision": "DECISION", "report": "REPORT", "blocked": "BLOCKED",
     "failed": "FAILED", "stopped": "STOPPED", "paused_unsupervised": "PAUSED_UNSUPERVISED",
@@ -292,6 +323,9 @@ def validate_config(cfg):
         raise ConfigError("executor.toolsets 必须是不重复的非空字符串数组")
     if not isinstance(executor.get("sandbox_exec", True), bool):
         raise ConfigError("executor.sandbox_exec 必须是布尔值")
+    hermes_bin = executor.get("hermes_bin")
+    if hermes_bin is not None and (not isinstance(hermes_bin, str) or not hermes_bin.strip()):
+        raise ConfigError("executor.hermes_bin 必须是非空字符串或省略")
     escalation = executor.get("escalation", {})
     if not isinstance(escalation, dict):
         raise ConfigError("executor.escalation 必须是 JSON object")
@@ -346,6 +380,9 @@ def validate_config(cfg):
             raise ConfigError("memory.%s 必须是正整数" % key)
     if "enabled" in cfg["monitor"] and not isinstance(cfg["monitor"]["enabled"], bool):
         raise ConfigError("monitor.enabled 必须是布尔值")
+    if (os.name == "nt"
+            and str(cfg["monitor"].get("backend") or "codex").strip().lower() == "hermes"):
+        raise ConfigError(WINDOWS_MONITOR_HERMES_ERROR)
     for key, value in (("monitor.timeout_minutes", cfg["monitor"].get("timeout_minutes", 40)),
                        ("freeze.check_seconds", cfg["freeze"].get("check_seconds", 60)),
                        ("supervision.verify_timeout_minutes", cfg["supervision"].get("verify_timeout_minutes", 30)),
@@ -1972,18 +2009,12 @@ def _validate_monitor_check(value, max_chars=300):
 
 def _monitor_codex_command(project, dossier_id, cfg, output_path, effort=None, schema_path=None):
     model = (cfg.get("monitor") or {}).get("model")
+    provider = monitor_provider(cfg)
     command = [platform_support.executable("codex"), "exec", "--json", "--ignore-user-config", "--ignore-rules", "--ephemeral",
                "--skip-git-repo-check", "-s", "read-only", "-C", dossier_path(project, dossier_id),
                "-m", model]
     command += platform_support.codex_readonly_config()
-    provider = monitor_provider(cfg)
-    if provider:
-        base_url = (cfg.get("monitor") or {}).get("base_url") or MONITOR_PROVIDER_URLS.get(provider)
-        if not base_url:
-            raise ConfigError(f"monitor.provider={provider} 需要 monitor.base_url")
-        command += ["-c", f'model_provider="{provider}"',
-                    "-c", (f'model_providers.{provider}={{name="{provider}",base_url="{base_url}",'
-                           f'env_key="{MONITOR_KEY_ENV}",wire_api="responses"}}')]
+    command += _monitor_codex_provider_args(cfg)
     if effort is not None:
         command += ["-c", f'model_reasoning_effort="{effort}"']
     tier = (cfg.get("monitor") or {}).get("service_tier")
@@ -1995,6 +2026,33 @@ def _monitor_codex_command(project, dossier_id, cfg, output_path, effort=None, s
 
 MONITOR_KEY_ENV = "BATON_MONITOR_API_KEY"
 MONITOR_PROVIDER_URLS = {"deepseek": "https://api.deepseek.com/v1"}
+WINDOWS_MONITOR_HERMES_ERROR = (
+    "Windows 上不能使用 monitor.backend=hermes：没有 sandbox-exec，无法保证 monitor 只读。"
+    "请改用 monitor.backend=\"codex\"，需要非 OpenAI 模型时设置 monitor.provider（例如 deepseek），"
+    "由 Codex 的只读沙箱运行 monitor。")
+
+
+def _monitor_codex_provider_args(cfg):
+    """Codex config overrides for a provider-backed monitor, or [] for Codex's own login."""
+    provider = monitor_provider(cfg)
+    if not provider:
+        return []
+    base_url = (cfg.get("monitor") or {}).get("base_url") or MONITOR_PROVIDER_URLS.get(provider)
+    if not base_url:
+        raise ConfigError(f"monitor.provider={provider} 需要 monitor.base_url")
+    return ["-c", f'model_provider="{provider}"',
+            "-c", (f'model_providers.{provider}={{name="{provider}",base_url="{base_url}",'
+                   f'env_key="{MONITOR_KEY_ENV}",wire_api="responses"}}')]
+
+
+def _monitor_codex_probe_command(cfg, dossier, output, model):
+    command = [platform_support.executable("codex"), "exec", "--json", "--ignore-user-config",
+               "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+               "-C", dossier, "-m", model]
+    command += platform_support.codex_readonly_config()
+    command += _monitor_codex_provider_args(cfg)
+    command += ["-o", output, "-"]
+    return command
 
 
 def monitor_provider(cfg):
@@ -2032,6 +2090,12 @@ def monitor_prompt_for(cfg, prompt, schema_path):
 def monitor_backend(cfg):
     """codex (default; Claude aliases run through the Claude CLI) or hermes."""
     return str((cfg.get("monitor") or {}).get("backend") or "codex").strip().lower()
+
+
+def require_supported_monitor(cfg):
+    """Reject monitor backends that cannot keep their read-only guarantee here."""
+    if os.name == "nt" and monitor_backend(cfg) == "hermes":
+        raise ConfigError(WINDOWS_MONITOR_HERMES_ERROR)
 
 
 def _monitor_hermes_command(project, dossier_id, cfg, effort, prompt):
@@ -2163,6 +2227,7 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
     stdout_path = os.path.join(out_dir, f"attempt-{attempt}.stdout.json")
     effort = _monitor_effort(cfg, dossier_kind)
     env = dict(os.environ)
+    require_supported_monitor(cfg)
     curation = dossier_kind == "curation"
     schema_path = os.path.join(TEMPLATES, "monitor-curation.schema.json" if curation else "monitor-brief.schema.json")
     if model in CLAUDE_MONITOR_MODELS:
@@ -2278,6 +2343,7 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
     schema_path = os.path.join(TEMPLATES, "monitor-check.schema.json")
     effort = _monitor_effort(cfg, "report")
     env = dict(os.environ)
+    require_supported_monitor(cfg)
     if model in CLAUDE_MONITOR_MODELS:
         env.update({"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                     "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
@@ -2982,6 +3048,27 @@ def _check_baseline_ref(st, leg):
     return leg.get("check_baseline_ref") or leg.get("start_ref") or st.get("base_ref")
 
 
+def _check_dossier_diff(store, baseline, probe_ref, fallback=None):
+    """Return a non-empty check diff when the incremental baseline raced the probe.
+
+    The probe ref is mutable and the check dossier is created asynchronously.  If
+    another state update has already advanced ``check_baseline_ref`` to the same
+    commit as ``probe_ref``, Git quite correctly returns an empty patch even though
+    the leg still differs from its start.  Fall back to the immutable leg start so
+    the monitor never receives an unexplained empty code diff.
+    """
+    if not store or not baseline or not probe_ref:
+        return baseline, ""
+    args = ("diff", "--binary", baseline, probe_ref, "--", ".", *code_excludes(store))
+    diff_text = store.git(*args, check=False)
+    if diff_text or not fallback or fallback == baseline:
+        return baseline, diff_text
+    fallback_diff = store.git("diff", "--binary", fallback, probe_ref, "--", ".", *code_excludes(store), check=False)
+    if fallback_diff:
+        return fallback, fallback_diff
+    return baseline, diff_text
+
+
 def _check_evidence_text(project, task, st, leg, baseline, probe_ref):
     store = project.store(task, st)
     lines = ["# 轮中证据", "", "## Diff"]
@@ -3034,13 +3121,13 @@ def build_check_dossier(project, task, st, leg):
         shutil.rmtree(root)
     os.makedirs(root, exist_ok=True)
     baseline = _check_baseline_ref(st, leg)
+    baseline, diff_text = _check_dossier_diff(store, baseline, probe_ref, fallback=leg.get("start_ref"))
     prompt = fill(read_text(os.path.join(TEMPLATES, "monitor-check-prompt.md")),
                   {"TASK": task, "DOSSIER": dossier_id})
     _dossier_write(os.path.join(root, "MONITOR_PROMPT.md"), prompt)
     _dossier_write(os.path.join(root, "charter.md"), _charter_text(project, task, st))
     _dossier_write(os.path.join(root, "precedents.md"), _precedents_text(project, task))
     _dossier_write(os.path.join(root, "evidence.md"), _check_evidence_text(project, task, st, leg, baseline, probe_ref))
-    diff_text = store.git("diff", "--binary", baseline, probe_ref, "--", ".", *code_excludes(store), check=False) if baseline else ""
     _dossier_write(os.path.join(root, "diff.patch"), diff_text)
     omissions = _dossier_code_snapshot(store, probe_ref, os.path.join(root, "code"))
     files = _dossier_files(root)
@@ -4806,18 +4893,71 @@ else:
 '''
 
 
+_HERMES_USAGE_READER = r'''
+import json, sqlite3, sys
+db_path, root_session = sys.argv[1], sys.argv[2]
+try:
+    conn = sqlite3.connect("file:" + db_path + "?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    parents = {}
+    for row in conn.execute("select id, parent_session_id from sessions"):
+        parents[row["id"]] = row["parent_session_id"]
+    ids = [root_session] if root_session else []
+    i = 0
+    while i < len(ids):
+        parent = ids[i]; i += 1
+        ids.extend(sid for sid, parent_id in parents.items() if parent_id == parent and sid not in ids)
+    if not ids:
+        raise RuntimeError("missing session")
+    placeholders = ",".join("?" for _ in ids)
+    values = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    usage_columns = {row[1] for row in conn.execute("pragma table_info(session_model_usage)")}
+    if usage_columns:
+        for target, column in (("input_tokens", "input_tokens"),
+                               ("cached_input_tokens", "cache_read_tokens"),
+                               ("output_tokens", "output_tokens")):
+            if column in usage_columns:
+                row = conn.execute("select coalesce(sum(" + column + "), 0) from session_model_usage where session_id in (" + placeholders + ")", ids).fetchone()
+                values[target] = int(row[0] or 0)
+    session_columns = {row[1] for row in conn.execute("pragma table_info(sessions)")}
+    if not any(values.values()) and session_columns:
+        for target, column in (("input_tokens", "input_tokens"),
+                               ("cached_input_tokens", "cache_read_tokens"),
+                               ("output_tokens", "output_tokens")):
+            if column in session_columns:
+                row = conn.execute("select coalesce(sum(" + column + "), 0) from sessions where id in (" + placeholders + ")", ids).fetchone()
+                values[target] = int(row[0] or 0)
+    conn.close()
+    print(json.dumps(values if any(values.values()) else None))
+except Exception as exc:
+    print(json.dumps({"warning": str(exc)}))
+'''
+
+
+def _hermes_task_profile(project, task, cfg, state=None):
+    state = state or project.read_state(task, {}) or {}
+    home = state.get("hermes_home")
+    profile = hermes_profile_dir(cfg, home=home) if home else hermes_profile_dir(cfg)
+    env = _hermes_subprocess_env(cfg)
+    if home:
+        env["HERMES_HOME"] = home
+    return profile, env
+
+
 def hermes_terminal_calls(project, task, leg, since=None):
     """Read terminal calls from the profile state.db through Hermes' venv Python."""
-    cfg = config_for_state(project, project.read_state(task, {}) or {})
-    db_path = os.path.join(hermes_profile_dir(cfg), "state.db")
-    session_id = leg.get("thread_id") or (project.read_state(task, {}) or {}).get("thread_id")
+    state = project.read_state(task, {}) or {}
+    cfg = config_for_state(project, state)
+    profile, env = _hermes_task_profile(project, task, cfg, state)
+    db_path = os.path.join(profile, "state.db")
+    session_id = leg.get("thread_id") or state.get("thread_id")
     python = hermes_python(cfg)
     if not python or not session_id or not os.path.isfile(db_path):
         return []
     try:
         result = subprocess.run([python, "-c", _HERMES_DB_READER, db_path, str(session_id),
                                  "" if since is None else str(since)],
-                                env=_hermes_subprocess_env(cfg), capture_output=True, text=True, timeout=10, encoding="utf-8")
+                                env=env, capture_output=True, text=True, timeout=10, encoding="utf-8")
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"WARN：Hermes state.db 读取失败：{exc}")
         return []
@@ -4837,6 +4977,43 @@ def hermes_terminal_calls(project, task, leg, since=None):
             call.setdefault("raw", call.get("command", ""))
             call["time"] = stamp(call["at"], fmt="%Y-%m-%d %H:%M:%S")
     return value
+
+
+def hermes_usage(project, task, leg):
+    """Read Hermes' persisted token totals for one session lineage.
+
+    Hermes does not emit Codex ``turn.completed`` events. Its state database
+    records totals in ``session_model_usage`` (and older profiles on
+    ``sessions``), so missing data is represented by ``None`` rather than a
+    fabricated all-zero usage record.
+    """
+    state = project.read_state(task, {}) or {}
+    cfg = config_for_state(project, state)
+    profile, env = _hermes_task_profile(project, task, cfg, state)
+    db_path = os.path.join(profile, "state.db")
+    session_id = leg.get("thread_id") or state.get("thread_id")
+    python = hermes_python(cfg)
+    if not python or not session_id or not os.path.isfile(db_path):
+        return None
+    try:
+        result = subprocess.run([python, "-c", _HERMES_USAGE_READER, db_path, str(session_id)],
+                                env=env, capture_output=True, text=True, timeout=10, encoding="utf-8")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = None
+    for line in reversed((result.stdout or "").splitlines()):
+        try:
+            value = json.loads(line)
+            break
+        except ValueError:
+            continue
+    if not isinstance(value, dict) or "input_tokens" not in value:
+        return None
+    try:
+        return {key: max(0, int(value.get(key) or 0))
+                for key in ("input_tokens", "cached_input_tokens", "output_tokens")}
+    except (TypeError, ValueError):
+        return None
 
 
 def external_action_findings(before_refs, after_refs, calls):
@@ -6561,7 +6738,12 @@ def codex_command(project, kind, thread_id, last_path, cfg=None, workspace_root=
         cmd += ["-c", f"sandbox_workspace_write.network_access={net}"]
     if ex.get("disable_fast_mode"):
         cmd += ["--disable", "fast_mode"]
-    for kv in ex.get("extra_config") or []:
+    extra_config = list(ex.get("extra_config") or [])
+    windows_sandbox_set = any(str(item).split("=", 1)[0].strip() == "windows.sandbox"
+                              for item in extra_config)
+    if os.name == "nt" and ex.get("sandbox") in {"workspace-write", "read-only"} and not windows_sandbox_set:
+        cmd += ["-c", 'windows.sandbox="unelevated"']
+    for kv in extra_config:
         cmd += ["-c", kv]
     if isolated:
         # Codex otherwise walks to the enclosing git root and can import a vault's
@@ -6602,15 +6784,30 @@ def hermes_sandbox_defines(project, cfg, workspace_root=None, task=None):
         "PROFILE_CONFIG": os.path.join(profile, "config.yaml"),
         "PROFILE_ENV": os.path.join(profile, ".env"),
         "BATON_HOME": baton_home,
-        "CLAUDE_HOME": os.path.join(home, ".claude"),
+        "CLAUDE_HOME": claude_config_dir(),
     }
     return {key: canonical_dir(value) for key, value in values.items()}
+
+
+def _hermes_prompt_file(project, task, prompt):
+    """Write a Windows Hermes prompt where cmd.exe never has to parse it."""
+    directory = project.task_dir(task) if task else os.path.join(project.dir, "runs")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "hermes-prompt.txt")
+    with open(path, "w", encoding="utf-8", newline="") as stream:
+        stream.write(str(prompt))
+    return path
 
 
 def hermes_command(project, kind, thread_id, prompt, cfg=None, task=None, workspace_root=None):
     """Build the exact Hermes invocation used by one executor leg."""
     cfg = cfg or project.config
     ex = cfg["executor"]
+    effort = hermes_reasoning_effort(ex.get("reasoning_effort"))
+    if not effort:
+        diagnostic = hermes_effort_diagnostic("executor.reasoning_effort", ex.get("reasoning_effort"))
+        raise ConfigError(diagnostic[1])
+    windows_native = os.name == "nt" and ex.get("sandbox_exec", True) is False
     profile = ex.get("hermes_profile", "baton-exec-v2")
     args = []
     if ex.get("sandbox_exec", True):
@@ -6621,15 +6818,19 @@ def hermes_command(project, kind, thread_id, prompt, cfg=None, task=None, worksp
     if kind == "resume":
         if not thread_id:
             raise ConfigError("Hermes resume 缺少 session_id")
-        args += ["-r", str(thread_id)]
+        args += (["--resume", str(thread_id)] if windows_native else ["-r", str(thread_id)])
     toolsets = list(ex.get("toolsets", ["file", "terminal", "todo"]))
     if memory_installed(cfg) and "baton-memory" not in toolsets:
         toolsets.append("baton-memory")
     if not memory_installed(cfg):
         toolsets = [item for item in toolsets if item != "baton-memory"]
-    args += ["-Q", "--query=" + str(prompt), "--provider", ex.get("provider", "openai-codex"),
-            "-m", ex["model"], "--reasoning", ex["reasoning_effort"], "--source", "tool",
-            "--yolo", "-t", ",".join(toolsets)]
+    if windows_native:
+        query_args = ["--query-file", _hermes_prompt_file(project, task, prompt)]
+    else:
+        query_args = ["--query=" + str(prompt)]
+    args += ["-Q", *query_args, "--provider", ex.get("provider", "openai-codex"),
+             "-m", ex["model"], "--reasoning", effort, "--source", "tool",
+             "--yolo", "-t", ",".join(toolsets)]
     return args
 
 
@@ -6773,12 +6974,17 @@ def hermes_ephemeral_system_prompt(project, task, st):
     return "\n".join(lines)
 
 
-WINDOWS_HERMES_ERROR = ("Hermes executor is unsupported on Windows: Hermes + sandbox-exec are macOS-oriented. "
-                        "Set executor.backend to codex.")
+WINDOWS_HERMES_ERROR = ("Windows 上没有 sandbox-exec，Hermes executor 必须以无沙箱方式运行："
+                        "在 baton.json 的 executor 中写 \"sandbox_exec\": false，明确接受 Hermes 使用 --yolo、"
+                        "可以读写本机任意文件。")
+WINDOWS_HERMES_SANDBOX_WARNING = ("executor.backend=hermes 在 Windows 上以 --yolo 无沙箱运行，"
+                                  "可以读写本机任意文件；已通过 executor.sandbox_exec=false 显式接受该风险。")
 
 
 def require_supported_executor(cfg):
-    if os.name == "nt" and cfg["executor"].get("backend") == "hermes":
+    executor = (cfg or {}).get("executor") or {}
+    if (os.name == "nt" and executor.get("backend") == "hermes"
+            and executor.get("sandbox_exec", True) is not False):
         raise ConfigError(WINDOWS_HERMES_ERROR)
 
 
@@ -6786,6 +6992,17 @@ def hermes_preflight(project, cfg):
     require_supported_executor(cfg)
     """Reject unsafe Hermes profile state before starting a leg."""
     ex = cfg["executor"]
+    effort = hermes_reasoning_effort(ex.get("reasoning_effort"))
+    if not effort:
+        diagnostic = hermes_effort_diagnostic("executor.reasoning_effort", ex.get("reasoning_effort"))
+        raise ConfigError(diagnostic[1])
+    escalation = ex.get("escalation") or {}
+    if escalation.get("enabled", True) and not hermes_reasoning_effort(
+            escalation.get("reasoning_effort", ex.get("reasoning_effort"))):
+        diagnostic = hermes_effort_diagnostic(
+            "executor.escalation.reasoning_effort",
+            escalation.get("reasoning_effort", ex.get("reasoning_effort")))
+        raise ConfigError(diagnostic[1])
     profile = hermes_profile_dir(cfg)
     env_file = os.path.join(profile, ".env")
     if hermes_env_has_assignments(env_file):
@@ -7136,7 +7353,7 @@ def harness_base_path():
 
 def harness_base_source_path():
     """Return the user instruction file used to derive the executor base."""
-    return os.path.abspath(os.path.expanduser("~/.claude/CLAUDE.md"))
+    return os.path.join(claude_config_dir(), "CLAUDE.md")
 
 
 def _harness_base_metadata(text):
@@ -7242,12 +7459,12 @@ def cmd_harness_base(project, args):
         print("是否存在：%s" % ("是" if info["exists"] else "否"))
         print("是否待审：%s（%s）" % ("是" if info["pending"] else "否", status_text))
         print("记录的 source_sha256：%s" % recorded)
-        print("当前 ~/.claude/CLAUDE.md 的 source_sha256：%s（%s）" % (current, match))
+        print("当前 %s 的 source_sha256：%s（%s）" % (source, current, match))
         print("字数：%d" % len(info["body"]))
         return
 
     if not os.path.isfile(source):
-        die("找不到源文件 %s；请先创建 ~/.claude/CLAUDE.md" % source)
+        die("找不到源文件 %s；请先创建该文件（或设置 CLAUDE_CONFIG_DIR）" % source)
 
     if action == "init":
         if os.path.exists(path) and not getattr(args, "force", False):
@@ -7265,7 +7482,7 @@ def cmd_harness_base(project, args):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as stream:
             stream.write(content)
-        print("已生成待审 harness-base.md：%s" % path)
+        print("已生成待审 harness-base.md：%s（源文件：%s）" % (path, source))
         return
 
     # approve
@@ -7338,13 +7555,15 @@ def build_harness_draft(project, task, cfg=None):
     base_status = _harness_base_status(base)
     lines.extend(["### 用户级基底（harness-base.md）", ""])
     if base_status == "missing":
-        lines.extend(["未找到用户级基底 %s；conductor 可运行 `baton harness base --init` 从 ~/.claude/CLAUDE.md 生成并审定，之后的任务自动带入。" % base["path"], ""])
+        lines.extend(["未找到用户级基底 %s；conductor 可运行 `baton harness base --init` 从 %s 生成并审定，之后的任务自动带入。"
+                      % (base["path"], harness_base_source_path()), ""])
     elif base_status == "pending":
-        lines.extend(["用户级基底 %s 仍待审定；请先运行 `baton harness base --approve`，审定后之后的任务自动带入。" % base["path"], ""])
+        lines.extend(["用户级基底 %s 仍待审定；源文件为 %s；请先运行 `baton harness base --approve`，审定后之后的任务自动带入。"
+                      % (base["path"], base["source_path"]), ""])
     else:
         lines.extend([base["body"], ""])
         if base_status == "stale":
-            lines.extend(["警告：~/.claude/CLAUDE.md 自基底审定后已修改；请 conductor 判断是否同步 harness-base.md，再运行 baton harness base --approve。", ""])
+            lines.extend([f"警告：{harness_base_source_path()} 自基底审定后已修改；请 conductor 判断是否同步 harness-base.md，再运行 baton harness base --approve。", ""])
     sources = _harness_instruction_sources(project)
     if sources:
         for path in sources:
@@ -7547,10 +7766,33 @@ def _codex_home_source():
     return os.path.abspath(os.path.expanduser(raw))
 
 
-def prepare_task_codex_home(project, task, target=None):
+def _codex_home_runtime_file(name):
+    """Runtime state that must never be inherited by another CODEX_HOME on Windows."""
+    if os.name != "nt":
+        return False
+    lowered = str(name).lower()
+    return (lowered == ".ds_store" or lowered.endswith(".lock") or lowered.endswith(".sqlite")
+            or lowered.endswith(".sqlite-wal") or lowered.endswith(".sqlite-shm")
+            or lowered.endswith(".sqlite-journal") or ".tmp" in lowered)
+
+
+def _executor_uses_openai_login(cfg):
+    executor = ((cfg or {}).get("executor") or {}) if isinstance(cfg, dict) else {}
+    if str(executor.get("backend") or "codex").lower() == "hermes":
+        return False
+    provider = "openai-codex"
+    for item in executor.get("extra_config") or []:
+        key, separator, value = str(item).partition("=")
+        if separator and key.strip() == "model_provider":
+            provider = value.strip().strip('"').strip("'").lower()
+    return provider in {"", "openai", "openai-codex"}
+
+
+def prepare_task_codex_home(project, task, target=None, cfg=None):
     """Create a task CODEX_HOME, inheriting regular config files but no AGENTS rules."""
     target = os.path.abspath(target or codex_task_home(project, task))
     source = _codex_home_source()
+    cfg = cfg or project.config
     os.makedirs(target, exist_ok=True)
     excluded = {"AGENTS.md", "AGENTS.override.md"}
     inherited = []
@@ -7561,10 +7803,19 @@ def prepare_task_codex_home(project, task, target=None):
                 os.remove(stale)
             except OSError:
                 pass
+    if os.name == "nt":
+        stale_auth = os.path.join(target, "auth.json")
+        if os.path.lexists(stale_auth) and not os.path.islink(stale_auth):
+            try:
+                os.remove(stale_auth)
+            except OSError as exc:
+                raise ConfigError(f"无法删除任务 CODEX_HOME 里的 auth.json 独立副本 {stale_auth}：{exc}") from exc
     if os.path.isdir(source) and os.path.realpath(source) != os.path.realpath(target):
-        shared_dirs = {"cache", "plugins", "packages"}
+        shared_dirs = {"cache", "plugins", "packages", "skills"}
         for name in sorted(os.listdir(source)):
             if name in excluded:
+                continue
+            if _codex_home_runtime_file(name):
                 continue
             src = os.path.join(source, name)
             dst = os.path.join(target, name)
@@ -7573,23 +7824,42 @@ def prepare_task_codex_home(project, task, target=None):
                     os.symlink(src, dst)
                     inherited.append(name)
                 except OSError:
-                    pass
-                continue
-            if name == "skills" and os.path.isdir(src) and not os.path.lexists(dst):
-                try:
-                    os.symlink(src, dst)
-                    inherited.append(name)
-                except OSError:
-                    pass
+                    if os.name != "nt":
+                        pass
+                    else:
+                        try:
+                            platform_support.directory_junction(src, dst)
+                            inherited.append(name)
+                        except OSError as exc:
+                            print(f"WARN：无法继承 Codex 目录 {src}，已跳过：{exc}")
                 continue
             if not os.path.isfile(src) or os.path.lexists(dst):
+                continue
+            if os.name == "nt" and name == "auth.json":
+                if _executor_uses_openai_login(cfg):
+                    try:
+                        os.symlink(src, dst)
+                        inherited.append(name)
+                    except OSError as exc:
+                        raise ConfigError(
+                            f"Windows 上无法为任务 CODEX_HOME 建立 auth.json 软链接：{exc}。"
+                            "auth.json 绝不复制，以免多个副本轮换同一个 refresh token；"
+                            "请打开 Windows 开发人员模式（允许非特权软链接），或改用非 OpenAI provider/Hermes。"
+                        ) from exc
                 continue
             try:
                 os.symlink(src, dst)
                 inherited.append(name)
             except OSError:
-                shutil.copy2(src, dst)
-                inherited.append(name)
+                if os.name != "nt":
+                    shutil.copy2(src, dst)
+                    inherited.append(name)
+                else:
+                    try:
+                        shutil.copy2(src, dst)
+                        inherited.append(name)
+                    except OSError as exc:
+                        print(f"WARN：无法继承 Codex 配置文件 {src}，已跳过：{exc}")
     return target, inherited, sorted(excluded)
 
 
@@ -7602,9 +7872,21 @@ def codex_executor_env(project, task, st=None):
     home = st.get("codex_home")
     if not home:
         return env
-    prepare_task_codex_home(project, task, target=home)
+    prepare_task_codex_home(project, task, target=home, cfg=config_for_state(project, st))
     env["CODEX_HOME"] = home
     return env
+
+
+def codex_sqlite_home_warning(cfg=None):
+    """Explain why Windows task homes should share a dedicated SQLite location."""
+    if os.name != "nt" or os.environ.get("CODEX_SQLITE_HOME"):
+        return ""
+    executor = ((cfg or {}).get("executor") or {})
+    if str(executor.get("backend") or "codex").lower() != "codex":
+        return ""
+    recommended = os.path.join(memory_baton_home(cfg), "codex-sqlite")
+    return ("未设置 CODEX_SQLITE_HOME；各任务 CODEX_HOME 的 SQLite 会话数据会各自独立。"
+            f"建议把它设到 Baton 专用目录，例如：{recommended}")
 
 
 def prepare_task_codex_context(project, task, st=None, workspace_root=None):
@@ -7615,7 +7897,8 @@ def prepare_task_codex_context(project, task, st=None, workspace_root=None):
     workspace_root = canonical_dir(workspace_root or st.get("launch_root") or project.root)
     path = os.path.join(workspace_root, "AGENTS.override.md")
     home = st.get("codex_home") or codex_task_home(project, task)
-    _, inherited, excluded = prepare_task_codex_home(project, task, target=home)
+    _, inherited, excluded = prepare_task_codex_home(project, task, target=home,
+                                                     cfg=config_for_state(project, st))
     task_dir = project.task_dir(task)
     backup_dir = os.path.join(task_dir, "codex-context-backup")
     backups = []
@@ -7829,9 +8112,18 @@ def hermes_env_has_assignments(path):
 def hermes_executable(cfg):
     explicit = os.environ.get("HERMES_BIN") or ((cfg.get("executor") or {}).get("hermes_bin") if isinstance(cfg, dict) else None)
     if explicit:
-        return os.path.abspath(os.path.expanduser(explicit)) if os.path.sep in explicit else explicit
+        resolved = os.path.abspath(os.path.expanduser(explicit)) if os.path.sep in explicit else explicit
+        return _reject_hermes_launcher(resolved)
     path = shutil.which("hermes")
-    return path or "hermes"
+    return _reject_hermes_launcher(path or "hermes")
+
+
+def _reject_hermes_launcher(path):
+    if os.name == "nt" and os.path.splitext(str(path))[1].lower() in {".cmd", ".bat", ".ps1"}:
+        raise ConfigError(
+            f"Windows 上的 Hermes 启动器是 {path}，它会经 cmd.exe 解析参数，长 prompt 和引号/百分号不可靠。"
+            "请设置 executor.hermes_bin 或 HERMES_BIN，指向原生 hermes.exe（与 codex.exe 的要求一致）。")
+    return path
 
 
 def hermes_profile_auth_path(cfg):
@@ -8078,7 +8370,7 @@ def legacy_claude_instruction_warnings(project):
     separate step.
     """
     paths = []
-    user_path = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+    user_path = os.path.join(claude_config_dir(), "CLAUDE.md")
     if os.path.isfile(user_path):
         paths.append(user_path)
     root = git_repo_top(project.root) or project.root
@@ -8637,7 +8929,7 @@ def cmd_new(project, args):
             stream.write(build_harness_draft(project, args.task))
         base = _harness_base_info()
         if _harness_base_status(base) == "stale":
-            print("警告：~/.claude/CLAUDE.md 自基底审定后已修改；请 conductor 判断是否同步 harness-base.md，再运行 baton harness base --approve。",
+            print(f"警告：{harness_base_source_path()} 自基底审定后已修改；请 conductor 判断是否同步 harness-base.md，再运行 baton harness base --approve。",
                   file=sys.stderr)
     project.update_state(args.task, lambda s: s.update(task=args.task, harness_required=True))
     print(brief)
@@ -8766,7 +9058,10 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
                     raise
                 cmd = hermes_command(project, kind, st.get("thread_id"), prompt, cfg=effective_cfg)
             if not effective_cfg["executor"].get("sandbox_exec", True):
-                print("WARN：executor.sandbox_exec=false，Hermes 将不受 Seatbelt 写入边界保护。")
+                if os.name == "nt":
+                    print("WARN：" + WINDOWS_HERMES_SANDBOX_WARNING)
+                else:
+                    print("WARN：executor.sandbox_exec=false，Hermes 将不受 Seatbelt 写入边界保护。")
         else:
             try:
                 cmd = codex_command(project, kind, st.get("thread_id"), last_path, cfg=effective_cfg,
@@ -8871,6 +9166,9 @@ def cmd_start(project, args):
     if st.get("status") == "closed":
         die(f"任务 {args.task} 已 closed，不能 start")
     cfg = config_for_state(project, st)
+    sqlite_warning = codex_sqlite_home_warning(cfg)
+    if sqlite_warning:
+        print("WARN：" + sqlite_warning)
     scope = parse_scope(brief, required=not bool(st.get("legs")))
     if scope is not None and not st.get("legs"):
         _validate_start_scope(project, scope)
@@ -9057,6 +9355,9 @@ def cmd_resume(project, args, message=None):
             die("找不到 Codex 会话 id，无法续跑；可能首轮没有成功启动，改用 baton start")
         project.update_state(args.task, lambda s: s.update(thread_id=tid))
     cfg = config_for_state(project, st)
+    sqlite_warning = codex_sqlite_home_warning(cfg)
+    if sqlite_warning:
+        print("WARN：" + sqlite_warning)
     amendment_hint = amendments_text(st)
     prompt = (f"[Baton 指挥 · {args.kind}]\n\n{message.strip()}\n\n"
               "（继续遵守 Baton 执行协议：小修改记 log，大修改写汇报后停下，"
@@ -9495,6 +9796,10 @@ def cmd_run(project, args):
                          "收到停止指令时执行者已自己结束，按它的结果记录" if finished_ok and (reason or error) else None,
                          f"本轮终点回滚点没建成：{cp_err}" if cp_err else None) if x]
     monitor_cfg = config_for_state(project, project.read_state(task, {}) or st)
+    if monitor_cfg["executor"].get("backend") == "hermes":
+        usage_state = project.read_state(task, {}) or st
+        usage_leg = dict(leg, backend="hermes", thread_id=usage_state.get("thread_id"))
+        dg["usage"] = hermes_usage(project, task, usage_leg)
     dossier_id = None
     if monitor_enabled(monitor_cfg) and status in ("report", "done", "violation"):
         # The dossier is assembled from the immutable end checkpoint after the executor leg
@@ -9627,7 +9932,9 @@ def leg_event_text(project, task, leg):
                 lines.append(f"自上次汇报以来（{base}）：{f} 个文件，+{a} −{d}；审阅用 baton diff {task} --since report")
             except Exception:  # noqa: BLE001
                 pass
-    if leg.get("usage"):
+    if cfg["executor"].get("backend") == "hermes":
+        lines.append(f"token：{fmt_usage(leg['usage'])}" if leg.get("usage") else "token：Hermes 未提供用量")
+    elif leg.get("usage"):
         lines.append(f"token：{fmt_usage(leg['usage'])}")
     lines.append(f"用时：{fmt_dur((leg.get('ended_at') or now()) - leg['started_at'])}")
     if leg.get("error"):
@@ -10788,7 +11095,7 @@ def cmd_config(project, args):
         print(f"monitor.{key}：{monitor.get(key)}")
     if project.judge_renamed_to_monitor:
         print("迁移提示：项目层的 judge 节已按 v2 早期草案改名为 monitor。")
-    for key in ("backend", "hermes_profile", "provider", "toolsets", "sandbox_exec", "model", "reasoning_effort", "service_tier", "disable_fast_mode", "network_access", "sandbox"):
+    for key in ("backend", "hermes_profile", "hermes_bin", "provider", "toolsets", "sandbox_exec", "model", "reasoning_effort", "service_tier", "disable_fast_mode", "network_access", "sandbox"):
         print(f"executor.{key}：{ex.get(key)}")
     for key in ("immediate", "delayed", "delayed_minutes"):
         print(f"executor.capacity_retry.{key}：{retry[key]}")
@@ -10824,9 +11131,13 @@ def doctor_hermes(project, cfg, line):
         line(level, message)
         failed = failed or level == "FAIL"
 
-    hermes = hermes_executable(cfg)
+    try:
+        hermes = hermes_executable(cfg)
+    except ConfigError as exc:
+        check("FAIL", str(exc))
+        return True
     hermes_available = os.path.isfile(hermes) or shutil.which(hermes)
-    check("OK" if hermes_available else "FAIL", f"hermes CLI：{hermes_available or '未安装'}")
+    check("OK" if hermes_available else "FAIL", f"hermes CLI：{hermes if hermes_available else '未安装'}")
     if hermes_available:
         version = subprocess.run([hermes, "--version"], env=_hermes_subprocess_env(cfg),
                                  capture_output=True, text=True, encoding="utf-8")
@@ -10847,14 +11158,29 @@ def doctor_hermes(project, cfg, line):
     check("OK" if len(entries) == 1 else "FAIL",
           f"profile auth.json：{provider} 凭据 {len(entries)} 条（必须恰好 1 条）")
     if len(entries) == 1 and provider == "openai-codex":
+        line("OK", f"Hermes provider：{provider}；model={cfg['executor']['model']}")
         account = hermes_account_ids(cfg)
         profile_id, codex_id = account["profile"], account["codex"]
         if account["mismatch"]:
             check("FAIL", f"账号 id 哈希不一致：{_account_id_hash(profile_id) or '缺失'}（Codex {_account_id_hash(codex_id) or '缺失'}）")
         elif profile_id and codex_id:
             check("OK", f"账号 id 哈希：{_account_id_hash(profile_id)}（Codex {_account_id_hash(codex_id)}）")
+        elif profile_id:
+            check("OK", f"Hermes 账号 id 哈希：{_account_id_hash(profile_id)}（未找到 Codex auth.json，跳过比较）")
         else:
             check("WARN", "无法从 profile/Codex auth.json 解析账号 id，未比较哈希")
+    elif len(entries) == 1:
+        line("OK", f"Hermes provider：{provider}；model={cfg['executor']['model']}")
+    for field, value in (("executor.reasoning_effort", cfg["executor"].get("reasoning_effort")),
+                         ("executor.escalation.reasoning_effort",
+                          (cfg["executor"].get("escalation") or {}).get(
+                              "reasoning_effort", cfg["executor"].get("reasoning_effort")))):
+        diagnostic = hermes_effort_diagnostic(field, value)
+        if diagnostic:
+            check(*diagnostic)
+    ex = cfg["executor"]
+    if ex.get("service_tier") is not None or ex.get("disable_fast_mode") is not None:
+        check("WARN", "Hermes executor 不支持 Codex 的 service_tier/fast mode 参数；这两个配置不会传给 Hermes")
     baseline_path = os.path.join(project.state_dir, "hermes-root-auth.sha256")
     baseline = read_text(baseline_path).strip() if os.path.exists(baseline_path) else ""
     current = _sha256_file(hermes_root_auth_path(cfg)) or "missing"
@@ -10862,8 +11188,14 @@ def doctor_hermes(project, cfg, line):
         check("OK" if baseline == current else "WARN", "根目录 auth.json 哈希未变化" if baseline == current else "根目录 auth.json 哈希已变化")
     else:
         check("WARN", "没有 init 保存的根目录 auth.json 哈希")
-    sandbox = shutil.which("sandbox-exec")
-    check("OK" if sandbox else "FAIL", f"sandbox-exec：{sandbox or '未安装'}")
+    if os.name == "nt":
+        if cfg["executor"].get("sandbox_exec", True) is not False:
+            check("FAIL", WINDOWS_HERMES_ERROR)
+        else:
+            check("WARN", WINDOWS_HERMES_SANDBOX_WARNING)
+    else:
+        sandbox = shutil.which("sandbox-exec")
+        check("OK" if sandbox else "FAIL", f"sandbox-exec：{sandbox or '未安装'}")
     return failed
 
 
@@ -11010,6 +11342,28 @@ def council_check(directory=None):
     return "OK", f"council 后端（{lib}）：配置里的顾问都已定义"
 
 
+def _baton_wrapper_points_to_skill(path):
+    target = str(Path(SKILL_DIR) / "scripts" / "baton.py").replace("\\", "/").lower()
+    try:
+        content = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return False
+    return target in content.replace("\\", "/").lower()
+
+
+def baton_path_check():
+    """Accept this skill's launcher or an installer wrapper that points at its baton.py."""
+    launcher = os.path.realpath(os.path.join(SKILL_DIR, "bin", "baton.cmd" if os.name == "nt" else "baton"))
+    on_path = shutil.which("baton")
+    if not on_path:
+        return "WARN", f"PATH 上没有 baton；可以直接用 {launcher}"
+    if os.path.normcase(os.path.realpath(on_path)) == os.path.normcase(launcher):
+        return "OK", f"baton 命令：{on_path}"
+    if os.name == "nt" and _baton_wrapper_points_to_skill(on_path):
+        return "OK", f"baton 命令：{on_path}（安装器 wrapper，指向本 skill）"
+    return "WARN", f"PATH 上的 baton（{on_path}）不是这个 skill 的；请把 {launcher} 放到 PATH 或重新安装"
+
+
 def cmd_doctor(project, args):
     ok = True
 
@@ -11029,25 +11383,32 @@ def cmd_doctor(project, args):
     else:
         line("OK", f"项目外状态目录：{state_size}")
     ex = cfg["executor"]
+    sqlite_warning = codex_sqlite_home_warning(cfg)
+    if sqlite_warning:
+        line("WARN", sqlite_warning)
     for path in legacy_claude_instruction_warnings(project):
         line("WARN", f"旧版 Baton 指令出现在 {path}：请改用 conductor.model、monitor 监督简报和 baton rule，不能派子 agent 代替 monitor")
     base = _harness_base_info()
     base_status = _harness_base_status(base)
     if base_status == "approved":
-        line("OK", f"harness-base：已审定且源文件哈希一致（{base['path']}）")
+        line("OK", f"harness-base：已审定且源文件哈希一致（{base['path']}；源文件：{base['source_path']}）")
     elif base_status == "stale":
-        line("WARN", f"harness-base：源文件哈希不一致（{base['path']}）；请同步后运行 baton harness base --approve")
+        line("WARN", f"harness-base：源文件哈希不一致（{base['path']}；源文件：{base['source_path']}）；请同步后运行 baton harness base --approve")
     elif base_status == "pending":
-        line("WARN", f"harness-base：存在但仍待审定（{base['path']}）；请运行 baton harness base --approve")
+        line("WARN", f"harness-base：存在但仍待审定（{base['path']}；源文件：{base['source_path']}）；请运行 baton harness base --approve")
     else:
-        line("WARN", f"harness-base：不存在（{base['path']}）；请运行 baton harness base --init")
-    codex = shutil.which("codex.exe" if os.name == "nt" else "codex")
-    codex_level = "WARN" if ex.get("backend") == "hermes" and not codex else ("OK" if codex else "FAIL")
-    line(codex_level, f"codex CLI：{codex or '未安装'}")
-    if codex:
-        line("OK", run([platform_support.executable("codex"), "--version"], check=False).strip())
+        line("WARN", f"harness-base：不存在（{base['path']}；源文件：{base['source_path']}）；请运行 baton harness base --init")
     if ex.get("backend") == "hermes":
-        if os.name == "nt":
+        line("OK", f"codex CLI：Hermes backend 不需要直连 Codex CLI（provider={executor_provider(cfg)}）")
+    else:
+        codex = shutil.which("codex.exe" if os.name == "nt" else "codex")
+        line("OK" if codex else "FAIL", f"codex CLI：{codex or '未安装'}")
+        if codex:
+            line("OK", run([platform_support.executable("codex"), "--version"], check=False).strip())
+    if os.name == "nt" and monitor_backend(cfg) == "hermes":
+        line("FAIL", WINDOWS_MONITOR_HERMES_ERROR)
+    if ex.get("backend") == "hermes":
+        if os.name == "nt" and ex.get("sandbox_exec", True) is not False:
             line("FAIL", WINDOWS_HERMES_ERROR)
         else:
             ok = not doctor_hermes(project, cfg, line) and ok
@@ -11056,34 +11417,31 @@ def cmd_doctor(project, args):
     line("OK" if baton_state == "存在" else "WARN",
          f"conductor 模型：{cfg['conductor']['model']}；monitor 模型：{cfg['monitor']['model']}；"
          f"baton.json：{baton_state}（{project.baton_config_path}）")
-    cache = read_json(os.path.expanduser("~/.codex/models_cache.json"), {})
-    models = cache.get("models", cache) if isinstance(cache, dict) else cache
-    model = next((m for m in models or [] if isinstance(m, dict) and m.get("slug") == ex["model"]), None)
-    if model:
-        efforts = [x.get("effort") for x in model.get("supported_reasoning_levels") or []]
-        line("OK" if ex["reasoning_effort"] in efforts else "FAIL",
-             f"模型 {ex['model']}，思考深度 {ex['reasoning_effort']}（可选：{'/'.join(efforts)}）")
+    if ex.get("backend") == "hermes":
+        line("OK", f"Hermes executor：provider={executor_provider(cfg)} model={ex['model']} effort={ex['reasoning_effort']}")
+        line("OK", "Hermes quota：跳过 Codex CLI quota probe，由 Hermes provider 管理")
     else:
-        line("WARN", f"models_cache 里没找到 {ex['model']}（可能只是缓存未刷新）")
-    fast_enabled = ex.get("service_tier") == "priority" and ex.get("disable_fast_mode") is False
-    line("OK" if fast_enabled else "WARN",
-         f"service_tier={ex.get('service_tier')}，disable_fast_mode={ex.get('disable_fast_mode')}"
-         f"（Fast 模式{'已开启' if fast_enabled else '未开启'}）")
-    data = safe_quota(block=True)
-    desc = codex_quota.describe(data)
-    if codex_quota.is_low(data):
-        print(desc.splitlines()[0])
-        line("WARN", desc.splitlines()[-1])
-    else:
-        line("OK" if data and data.get("source") == "live" else "WARN", desc.splitlines()[-1])
-    launcher = os.path.realpath(os.path.join(SKILL_DIR, "bin", "baton.cmd" if os.name == "nt" else "baton"))
-    on_path = shutil.which("baton")
-    if not on_path:
-        line("WARN", f"PATH 上没有 baton；可以直接用 {launcher}")
-    elif os.path.normcase(os.path.realpath(on_path)) != os.path.normcase(launcher):
-        line("WARN", f"PATH 上的 baton（{on_path}）不是这个 skill 的，请改用 {launcher} 或处理同名冲突")
-    else:
-        line("OK", f"baton 命令：{on_path}")
+        cache = read_json(os.path.expanduser("~/.codex/models_cache.json"), {})
+        models = cache.get("models", cache) if isinstance(cache, dict) else cache
+        model = next((m for m in models or [] if isinstance(m, dict) and m.get("slug") == ex["model"]), None)
+        if model:
+            efforts = [x.get("effort") for x in model.get("supported_reasoning_levels") or []]
+            line("OK" if ex["reasoning_effort"] in efforts else "FAIL",
+                 f"模型 {ex['model']}，思考深度 {ex['reasoning_effort']}（可选：{'/'.join(efforts)}）")
+        else:
+            line("WARN", f"models_cache 里没找到 {ex['model']}（可能只是缓存未刷新）")
+        fast_enabled = ex.get("service_tier") == "priority" and ex.get("disable_fast_mode") is False
+        line("OK" if fast_enabled else "WARN",
+             f"service_tier={ex.get('service_tier')}，disable_fast_mode={ex.get('disable_fast_mode')}"
+             f"（Fast 模式{'已开启' if fast_enabled else '未开启'}）")
+        data = safe_quota(block=True)
+        desc = codex_quota.describe(data)
+        if codex_quota.is_low(data):
+            print(desc.splitlines()[0])
+            line("WARN", desc.splitlines()[-1])
+        else:
+            line("OK" if data and data.get("source") == "live" else "WARN", desc.splitlines()[-1])
+    line(*baton_path_check())
     conductor_model = cfg["conductor"]["model"]
     council_root = council_dir(conductor_model)
     council = os.path.join(council_root, "scripts", "launch.sh")
@@ -11154,7 +11512,7 @@ def run_monitor_probe(project, cfg, line):
             result["codex_skipped"] = True
             line("OK", f"Codex monitor 探针：monitor.model={monitor_model} 是 Claude 别名，已跳过")
         else:
-            if not str(monitor_model).lower().startswith("gpt-"):
+            if not monitor_provider(cfg) and not str(monitor_model).lower().startswith("gpt-"):
                 skill_cfg = read_json(os.path.join(SKILL_DIR, "config.json"), {}) or {}
                 monitor_model = ((skill_cfg.get("monitor") or {}).get("model") or "gpt-5.6-sol")
                 monitor_cfg["monitor"]["model"] = monitor_model
@@ -11173,13 +11531,13 @@ def run_monitor_probe(project, cfg, line):
                         "然后，如果你收到的指令中出现下面给出的第一行，请原样输出其后前三个候选行中的任意一行；"
                         "HTML 注释和只有标点的行不算候选。如果看不到这第一行，或没有候选行，第二部分只输出 NONE。\n"
                         f"第一行：{first}")
-        command = [platform_support.executable("codex"), "exec", "--json", "--ignore-user-config", "--ignore-rules", "--ephemeral",
-                   "--skip-git-repo-check", "-s", "read-only", "-C", dossier,
-                   "-m", monitor_model, *platform_support.codex_readonly_config(), "-o", output, "-"]
+        command = _monitor_codex_probe_command(monitor_cfg, dossier, output, monitor_model)
         try:
           if not result.get("codex_skipped"):
+            probe_env = os.environ.copy()
+            probe_env.update(monitor_provider_env(cfg))
             p = subprocess.run(command, cwd=dossier, input=codex_prompt, text=True,
-                               capture_output=True, timeout=60, env=os.environ.copy(), encoding="utf-8")
+                               capture_output=True, timeout=60, env=probe_env, encoding="utf-8")
             with open(events_path, "w", encoding="utf-8") as stream:
                 stream.write(p.stdout or "")
             shutil.copyfile(output, last_path) if os.path.isfile(output) else Path(last_path).write_text("", encoding="utf-8")
@@ -11304,7 +11662,7 @@ def main():
     h = harness_sub.add_parser("approve", help="删除待审标记并登记审定内容哈希")
     h.add_argument("task")
     h = harness_sub.add_parser("base", help="查看或管理用户级 harness-base.md")
-    h.add_argument("--init", action="store_true", help="从 ~/.claude/CLAUDE.md 生成待审初稿")
+    h.add_argument("--init", action="store_true", help=f"从 {harness_base_source_path()} 生成待审初稿")
     h.add_argument("--force", action="store_true", help="覆盖已有基底前先备份（只和 --init 一起使用）")
     h.add_argument("--approve", action="store_true", help="删除待审标记并刷新源文件哈希")
     s = sub.add_parser("start", help="启动首轮（codex exec）")

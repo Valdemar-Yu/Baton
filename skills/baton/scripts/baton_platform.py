@@ -77,12 +77,31 @@ def executable(name):
     return os.path.abspath(resolved)
 
 
+def directory_junction(source, target):
+    """Create a Windows directory junction without requiring Developer Mode."""
+    if os.name != "nt":
+        raise OSError("directory junctions are Windows-only")
+    source = os.path.abspath(source)
+    target = os.path.abspath(target)
+    comspec = os.environ.get("COMSPEC") or "cmd.exe"
+    result = subprocess.run([comspec, "/d", "/c", "mklink", "/J", target, source],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+    if result.returncode == 0 and os.path.isdir(target):
+        return target
+    detail = (result.stderr or result.stdout or "").strip()
+    raise OSError(f"mklink /J failed ({result.returncode}): {detail}")
+
+
 def _kernel():
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     k.OpenProcess.restype = wintypes.HANDLE
     k.CloseHandle.argtypes = [wintypes.HANDLE]
     k.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k.GetProcessTimes.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+                                  ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+                                  ctypes.POINTER(wintypes.FILETIME)]
     return k
 
 
@@ -118,11 +137,173 @@ def powershell_json(script, timeout=8):
     return json.loads(p.stdout) if p.stdout.strip() else None
 
 
+_WMI_ACCESS_DENIED_MARKERS = ("0x80041003", "access denied", "access is denied",
+                              "permissiondenied", "拒绝访问")
+_FILETIME_UNIX_EPOCH = 116444736000000000
+
+
+def _wmi_access_denied(error):
+    text = str(error).lower()
+    return any(marker in text for marker in _WMI_ACCESS_DENIED_MARKERS)
+
+
+def _native_process_creation(pid):
+    """Creation time as a CIM-style JSON date, from the Windows process handle."""
+    k = _kernel()
+    handle = k.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        if not k.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                 ctypes.byref(kernel_time), ctypes.byref(user_time)):
+            return None
+        value = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return f"/Date({(value - _FILETIME_UNIX_EPOCH) // 10000})/"
+    finally:
+        k.CloseHandle(handle)
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260)]
+
+
+def _native_process_rows():
+    """Toolhelp snapshot with creation times; used when the CIM namespace is denied."""
+    k = _kernel()
+    k.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    k.Process32FirstW.restype = wintypes.BOOL
+    k.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    k.Process32NextW.restype = wintypes.BOOL
+    snapshot = k.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    rows = []
+    try:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        found = k.Process32FirstW(snapshot, ctypes.byref(entry))
+        while found:
+            pid = int(entry.th32ProcessID)
+            created = _native_process_creation(pid)
+            if created is not None:
+                rows.append({"ProcessId": pid,
+                             "ParentProcessId": int(entry.th32ParentProcessID),
+                             "CreationDate": created})
+            found = k.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        k.CloseHandle(snapshot)
+    return rows
+
+
+class _PROCESS_BASIC_INFORMATION(ctypes.Structure):
+    _fields_ = [("Reserved1", ctypes.c_void_p), ("PebBaseAddress", ctypes.c_void_p),
+                ("Reserved2_0", ctypes.c_void_p), ("Reserved2_1", ctypes.c_void_p),
+                ("UniqueProcessId", ctypes.c_void_p), ("Reserved3", ctypes.c_void_p)]
+
+
+def _native_proc_cmdline(pid):
+    """Read another process's command line without WMI, using its PEB."""
+    k = _kernel()
+    handle = k.OpenProcess(0x1000 | 0x10, False, int(pid))  # QUERY_LIMITED_INFORMATION | VM_READ
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: PID does not exist
+            return ""
+        raise RuntimeError(f"Cannot open PID {pid} for its command line: {ctypes.WinError(error)}")
+    try:
+        k.IsWow64Process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        wow64 = wintypes.BOOL()
+        if not k.IsWow64Process(handle, ctypes.byref(wow64)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        ptr_size = 8 if ctypes.sizeof(ctypes.c_void_p) == 8 and not wow64.value else 4
+        nt = ctypes.WinDLL("ntdll", use_last_error=True)
+        nt.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, wintypes.ULONG, ctypes.c_void_p,
+                                                wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)]
+        nt.NtQueryInformationProcess.restype = ctypes.c_long
+        basic = _PROCESS_BASIC_INFORMATION()
+        returned = wintypes.ULONG()
+        status = nt.NtQueryInformationProcess(handle, 0, ctypes.byref(basic),
+                                              ctypes.sizeof(basic), ctypes.byref(returned))
+        if status != 0:
+            raise RuntimeError(f"Cannot read process information for PID {pid}: NTSTATUS {status:#x}")
+        peb = int(basic.PebBaseAddress or 0)
+        if ptr_size == 4 and ctypes.sizeof(ctypes.c_void_p) == 8:
+            peb32 = ctypes.c_void_p()
+            status = nt.NtQueryInformationProcess(handle, 26, ctypes.byref(peb32),
+                                                  ctypes.sizeof(peb32), ctypes.byref(returned))
+            if status != 0:
+                raise RuntimeError(f"Cannot read 32-bit PEB for PID {pid}: NTSTATUS {status:#x}")
+            peb = int(peb32.value or 0)
+
+        def read(address, size):
+            buffer = (ctypes.c_ubyte * size)()
+            count = ctypes.c_size_t()
+            if not k.ReadProcessMemory(handle, ctypes.c_void_p(address), buffer, size, ctypes.byref(count)) \
+                    or count.value != size:
+                raise ctypes.WinError(ctypes.get_last_error())
+            return bytes(buffer)
+
+        params = int.from_bytes(read(peb + (0x20 if ptr_size == 8 else 0x10), ptr_size), "little")
+        head = read(params + (0x70 if ptr_size == 8 else 0x40), 16 if ptr_size == 8 else 8)
+        length = int.from_bytes(head[:2], "little")
+        if length > 32768:
+            raise RuntimeError(f"Invalid command-line length for PID {pid}: {length}")
+        if not length:
+            return ""
+        buffer = int.from_bytes(head[8:16] if ptr_size == 8 else head[4:8], "little")
+        return read(buffer, length).decode("utf-16-le")
+    finally:
+        k.CloseHandle(handle)
+
+
+def _process_rows():
+    try:
+        rows = powershell_json("@(Get-CimInstance Win32_Process | Select-Object "
+                               "ProcessId,ParentProcessId,CreationDate) | ConvertTo-Json -Compress")
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        if isinstance(error, RuntimeError) and not _wmi_access_denied(error):
+            raise
+        rows = _native_process_rows()
+    return rows or []
+
+
+def _process_creation_time(pid):
+    try:
+        current = powershell_json(
+            f"Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}' | "
+            "Select-Object CreationDate | ConvertTo-Json -Compress")
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        if isinstance(error, RuntimeError) and not _wmi_access_denied(error):
+            raise
+        return _native_process_creation(pid)
+    return current.get("CreationDate") if current else None
+
+
 def proc_cmdline(pid):
     """CIM provides Unicode full command lines; timeout/query denial raises, never 'dead'."""
-    result = powershell_json(
-        f"Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}' | "
-        "Select-Object -ExpandProperty CommandLine | ConvertTo-Json -Compress")
+    try:
+        result = powershell_json(
+            f"Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}' | "
+            "Select-Object -ExpandProperty CommandLine | ConvertTo-Json -Compress")
+    except RuntimeError as error:
+        if not _wmi_access_denied(error):
+            raise
+        try:
+            result = _native_proc_cmdline(pid)
+        except (OSError, RuntimeError):
+            if not pid_alive(pid):
+                return ""  # the process exited while CIM was being denied
+            raise
     if not result and pid_alive(pid):
         raise RuntimeError(f"Cannot read command line of live PID {pid}; refusing PID-reuse guess")
     return result or ""
@@ -273,8 +454,7 @@ def send_break(pid):
 
 def process_tree(pid):
     """Capture descendant identities before graceful exit can orphan them."""
-    rows = powershell_json("@(Get-CimInstance Win32_Process | Select-Object "
-                           "ProcessId,ParentProcessId,CreationDate) | ConvertTo-Json -Compress") or []
+    rows = _process_rows()
     by_pid = {r["ProcessId"]: r for r in rows}
     if int(pid) not in by_pid:
         return {}
@@ -292,6 +472,28 @@ def process_tree(pid):
     return {r["ProcessId"]: r["CreationDate"] for r in rows if r["ProcessId"] in members}
 
 
+def _terminate_process(pid):
+    """Last-resort termination when taskkill is denied by the current job/sandbox."""
+    k = _kernel()
+    k.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    k.TerminateProcess.restype = wintypes.BOOL
+    handle = k.OpenProcess(0x0001, False, int(pid))  # PROCESS_TERMINATE
+    if not handle:
+        return ctypes.get_last_error() == 87  # already gone
+    try:
+        return bool(k.TerminateProcess(handle, 1))
+    finally:
+        k.CloseHandle(handle)
+
+
+def _kill_process(pid):
+    p = subprocess.run([executable("taskkill"), "/PID", str(pid), "/T", "/F"],
+                       capture_output=True, timeout=10,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+    if p.returncode and pid_alive(pid) and not _terminate_process(pid):
+        raise RuntimeError(f"taskkill failed for live PID {pid}: {p.stderr!r}")
+
+
 def stop_tree(pid, graces):
     identities = process_tree(pid)
     send_break(pid)
@@ -305,16 +507,9 @@ def stop_tree(pid, graces):
         created = identities[child]
         if not pid_alive(child):
             continue
-        current = powershell_json(
-            f"Get-CimInstance Win32_Process -Filter 'ProcessId={child}' | "
-            "Select-Object CreationDate | ConvertTo-Json -Compress")
-        if not current or current["CreationDate"] != created:
+        if _process_creation_time(child) != created:
             continue  # PID now belongs to a different process
-        p = subprocess.run([executable("taskkill"), "/PID", str(child), "/T", "/F"],
-                           capture_output=True, timeout=10,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
-        if p.returncode and pid_alive(child):
-            raise RuntimeError(f"taskkill failed for live PID {child}: {p.stderr!r}")
+        _kill_process(child)
     deadline = time.monotonic() + graces[-1]
     while any(pid_alive(p) for p in identities) and time.monotonic() < deadline:
         time.sleep(0.2)

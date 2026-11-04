@@ -9,9 +9,22 @@ or Git. `BATON_CODEX_BIN`, when used by the quota reader, must resolve to an
 Windows defaults to `executor.backend: codex` and `memory.backend: local`.
 Project settings can explicitly select mem0, but it needs a separately installed
 memory environment and a working Ollama embedding model. Local memory keeps the
-ledger and keyword retrieval; doctor reports WARN rather than FAIL. Hermes execution
-is unsupported on Windows: doctor fails and init/start/resume refuse it with a
-message explaining that Hermes + sandbox-exec are macOS-oriented.
+ledger and keyword retrieval; doctor reports WARN rather than FAIL.
+
+Windows also supports a native, **unsandboxed** Hermes executor. It is opt-in:
+`baton.json` must set `executor.backend: "hermes"` and `executor.sandbox_exec: false`.
+Hermes then runs with `--yolo` and can read and write any file the current user can
+access. This trade-off is intentional for native Windows, which has no
+`sandbox-exec`; a future WSL version may restore a sandbox. If `sandbox_exec` is
+missing or true, `baton init/start/resume/doctor` refuse the configuration and
+explain the required setting. The runtime prints a WARN on `start`/`resume` and
+doctor reports WARN once the opt-out is explicit.
+
+Hermes monitoring is not available on Windows. `monitor.backend` must remain
+`codex`; `monitor.provider` (for example `deepseek`) continues to run through
+Codex's read-only sandbox. `monitor.backend: "hermes"` raises a ConfigError that
+names this restriction.
+
 The v2 Codex monitor, shadow repository, 60-second frozen checks, mid-leg checks,
 ruling ledger/verdict gate, lean mode, capacity retries and quota/statusline remain.
 
@@ -30,6 +43,75 @@ error. An identical installation is left alone. `CLAUDE_SKILLS_DIR` and
 `BATON_BIN_DIR` override the destinations, as on POSIX; `-SkillsDir` and
 `-BinDir` are also available. Add the bin directory to PATH yourself if needed.
 The POSIX installer and optional council installation are unchanged.
+`CLAUDE_CONFIG_DIR` overrides `~/.claude` for the default skill destination,
+`baton harness base`, legacy-instruction warnings and statusline settings.
+
+## Hermes executor
+
+Use a native `hermes.exe`, not `hermes.cmd`, `hermes.bat` or `hermes.ps1`.
+The installer and `baton doctor` reject wrapper launchers because cmd.exe parses
+long prompts, quotes and `%` differently. Point at the real executable explicitly:
+
+```json
+{
+  "executor": {
+    "backend": "hermes",
+    "sandbox_exec": false,
+    "hermes_bin": "C:/path/to/hermes.exe",
+    "hermes_profile": "baton-exec-v2",
+    "provider": "openai-codex"
+  },
+  "monitor": {
+    "backend": "codex",
+    "provider": "deepseek"
+  }
+}
+```
+
+`executor.hermes_bin` (or `HERMES_BIN`) may be omitted when a native `hermes.exe`
+is on PATH. `executor.provider` selects the Hermes provider; for example use
+`deepseek` when the profile has a DeepSeek credential. Log in once in the user's
+own terminal, not through Baton, for the provider selected by `executor.provider`:
+
+```powershell
+hermes -p baton-exec-v2 auth add <provider> --type oauth
+hermes -p baton-exec-v2 auth list <provider>
+# OpenAI Codex: provider is openai-codex; DeepSeek: provider is deepseek.
+# Use the credential type required by that provider if it is not oauth.
+```
+
+The prompt is written to `.baton/tasks/<task>/hermes-prompt.txt` and passed with
+`--query-file` on Windows, avoiding the 32767-character command line limit and
+cmd.exe quoting. Resume uses `--resume`; POSIX installations continue to use
+`--query=` and `-r`. Without a sandbox, Hermes's own tool policy is the only
+guardrail. Run it only in projects where the user accepts that risk.
+
+## Codex home and Windows sandbox
+
+Each task's `CODEX_HOME` inherits ordinary config files, but never runtime state:
+`*.lock`, `*.sqlite` and its `-wal`/`-shm`/`-journal`, `*.tmp*`, and
+`.DS_Store`. SQLite session data is left to Codex. Set `CODEX_SQLITE_HOME` to a
+dedicated directory (for example `%BATON_HOME%\codex-sqlite`) so task homes do
+not each build independent session databases; start, resume and doctor print a
+WARN when it is unset.
+
+`auth.json` is only ever linked, never copied. If Windows denies the symlink,
+OpenAI-login executors fail with instructions to enable Developer Mode
+(`Start ms-settings:developers`) or switch to a non-OpenAI provider/Hermes; those
+modes do not need `auth.json`. Other regular files fall back to a copy and a
+failed copy is skipped with a WARN. The shared directories `cache`, `plugins`,
+`packages` and `skills` fall back to a directory junction, which needs neither
+elevation nor Developer Mode.
+
+Codex executor commands default to `-c windows.sandbox="unelevated"` for
+`workspace-write` and `read-only`. An explicit `windows.sandbox` value in
+`executor.extra_config` is kept and is not duplicated.
+
+Windows sandbox grants writing only to files created after the grant. Existing
+workspace files that did not inherit the sandbox capability SID remain readable
+but cannot be modified by an unelevated sandbox; create/replace the file from
+outside the sandbox or repair the ACL. This is a sandbox/ACL property, not a
+Baton configuration error.
 
 Run `baton init --no-statusline`, then `baton doctor` in a new project. Statusline commands on
 Windows require Git Bash and quote absolute forward-slash paths, including
@@ -102,7 +184,8 @@ Each test file runs in a fresh process, sequentially, to bound memory. The runne
 isolates HOME/USERPROFILE/BATON_HOME/cache in TEMP and blocks live Codex/Claude
 calls. Fake executables use the launcher shipped in the already-installed pip;
 no dependency is installed. Live mem0/Ollama/MCP integration and unsupported
-Hermes/POSIX installation paths are explicitly skipped. Logs/counts go to
+POSIX installation paths are explicitly skipped; Windows Hermes tests use a
+fake native `hermes.exe` and never invoke a model. Logs/counts go to
 `test-results/`. The smoke script uses a synthetic quota cache, never `start`.
 
 Windows tests exercise real process probes, cross-process lock exclusion,

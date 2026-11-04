@@ -1,6 +1,6 @@
 ﻿[CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$SkillsDir = $(if ($env:CLAUDE_SKILLS_DIR) { $env:CLAUDE_SKILLS_DIR } else { "$env:USERPROFILE/.claude/skills" }),
+    [string]$SkillsDir = $(if ($env:CLAUDE_SKILLS_DIR) { $env:CLAUDE_SKILLS_DIR } elseif ($env:CLAUDE_CONFIG_DIR) { "$env:CLAUDE_CONFIG_DIR/skills" } else { "$env:USERPROFILE/.claude/skills" }),
     [string]$BinDir = $(if ($env:BATON_BIN_DIR) { $env:BATON_BIN_DIR } else { "$env:USERPROFILE/.local/bin" })
 )
 $ErrorActionPreference = 'Stop'
@@ -17,10 +17,15 @@ $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinu
 if (-not $python -or -not $git) { throw 'Python and Git for Windows must be installed and on PATH.' }
 Write-Output "Codex: $($codex.Source)"
 Write-Output 'Windows defaults: executor.backend=codex; memory.backend=local; monitor via Codex.'
-Write-Output 'Hermes: unsupported on Windows (Hermes + sandbox-exec are macOS-oriented); absence is optional.'
+Write-Output 'Optional Hermes executor: supported without a sandbox on Windows. Set executor.backend="hermes", executor.sandbox_exec=false, and executor.hermes_bin to a native hermes.exe; Hermes runs with --yolo and can read/write any local file.'
+Write-Output 'Monitor on Windows: monitor.backend="codex" only; optional monitor.provider (for example deepseek) keeps Codex read-only sandboxing. monitor.backend="hermes" is rejected.'
+Write-Output 'Hermes login (user-run, not by this installer): hermes -p baton-exec-v2 auth add <provider> --type oauth'
 $ollama = Get-Command ollama.exe -CommandType Application -ErrorAction SilentlyContinue
 if ($ollama) { Write-Output "Optional Ollama: $($ollama.Source); mem0 also needs a separately configured memory environment." }
 else { Write-Output 'Optional Ollama/mem0: absent; local ledger/keyword memory remains available.' }
+$hermes = Get-Command hermes.exe -CommandType Application -ErrorAction SilentlyContinue
+if ($hermes) { Write-Output "Optional native Hermes: $($hermes.Source)" }
+else { Write-Output 'Optional native Hermes: absent; Hermes executor remains optional. Do not use .cmd/.bat/.ps1 launchers.' }
 
 # Native Windows junctions need neither elevation nor Developer Mode.
 $source = (Resolve-Path -LiteralPath "$PSScriptRoot/skills/baton").Path
