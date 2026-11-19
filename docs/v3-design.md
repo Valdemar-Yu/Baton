@@ -4,20 +4,9 @@ Baton v3 是面向研究型开发与实验工程（Research Baton）的全新大
 
 ## 一、核心架构与四角色分工
 
-```text
-用户 ◄──► Conductor (agy / Gemini 4 Carbon High) ──[baton advise design|decide|unblock]──► Advisor (agy -p / Gemini 4 Neon XHigh, 无状态)
-                │                                                                                  ▲
-                │ start / resume / steer                                                           │ 终审 CLOSE / VIOLATION /
-                ▼                                                                                  │ 连续≥2 REVISE（单轨直达，跳过 Monitor）
-         Executor (claude -p / Claude Opus XHigh) ──stream-json──► Baton CLI (L1 0-token Watchdog + 冻结校验 + 亲跑验证 + RED_FLAGS 扫描 + 卷宗封存)
-                                                                                                   │
-                                                                                                   │ 常规 REPORT
-                                                                                                   ▼
-                                                                                      Monitor (agy -p / Gemini 4 Hydrogen XHigh, 只读卷宗)
-                                                                                                   │
-                                                                                                   ▼
-                                                                                    Findings (F1/F2...) ──► Conductor `baton rule` 入哈希链账本
-```
+<p align="center">
+  <img src="../assets/brand/baton-v3-architecture.png" alt="Baton v3 架构总览（四角色零重叠分工）" width="100%">
+</p>
 
 | 角色 | 默认模型 / 运行时 | 上下文状态 | 职责边界 |
 |---|---|---|---|

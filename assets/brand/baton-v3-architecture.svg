@@ -1,0 +1,242 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 712" width="1200" height="712" role="img" aria-label="Baton v3 Architecture: Agy-Core + Claude-Coding Research Baton">
+  <defs>
+    <style>
+      .font-sans { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .font-mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 21px; font-weight: 700; fill: #14203E; }
+      .subtitle { font-size: 12.5px; font-weight: 500; fill: #52607E; }
+      .card-title { font-size: 15.5px; font-weight: 700; fill: #14203E; }
+      .body { font-size: 11.8px; fill: #334155; }
+      .badge-txt { font-size: 10.6px; font-weight: 600; }
+      .chip-txt { font-size: 11px; font-weight: 600; fill: #1E293B; }
+      .edge-lbl { font-size: 10.6px; font-weight: 600; fill: #334155; }
+      .edge-sub { font-size: 10.4px; font-weight: 500; fill: #64748B; }
+      .legend-txt { font-size: 11px; font-weight: 600; fill: #475569; }
+    </style>
+
+    <pattern id="dotGrid" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#DCE3EE" />
+    </pattern>
+
+    <filter id="cardShadow" x="-6%" y="-6%" width="112%" height="118%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0F172A" flood-opacity="0.07" />
+    </filter>
+
+    <marker id="arrowNavy" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#475569" />
+    </marker>
+    <marker id="arrowCoral" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#E0533C" />
+    </marker>
+    <marker id="arrowGold" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#C97E0A" />
+    </marker>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#0F9473" />
+    </marker>
+    <marker id="arrowViolet" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#7252DC" />
+    </marker>
+  </defs>
+
+  <!-- Outer canvas -->
+  <rect x="6" y="6" width="1188" height="700" rx="18" fill="#FAFBFD" stroke="#E2E8F0" stroke-width="1.5" />
+  <rect x="14" y="14" width="1172" height="684" rx="14" fill="url(#dotGrid)" opacity="0.65" />
+
+  <!-- Header -->
+  <g transform="translate(34, 30)">
+    <rect x="0" y="2" width="6" height="40" rx="3" fill="#E0533C" />
+    <text x="16" y="22" class="font-sans title">Baton v3 架构总览 · 四角色零重叠分工</text>
+    <text x="16" y="42" class="font-sans subtitle">Agy-Core + Claude-Coding Research Baton  |  单轨冷眼审计 · 0-Token 研究红线守卫 · 哈希链账本</text>
+
+    <!-- Quota Pool Legend (Top Right) -->
+    <g transform="translate(744, 5)">
+      <rect x="0" y="0" width="388" height="36" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2" />
+      <circle cx="18" cy="18" r="5" fill="#E0533C" />
+      <circle cx="31" cy="18" r="5" fill="#D98A16" />
+      <circle cx="44" cy="18" r="5" fill="#7252DC" />
+      <text x="58" y="22" class="font-sans legend-txt">Agy 5h/7d 共享配额池</text>
+      <line x1="208" y1="8" x2="208" y2="28" stroke="#E2E8F0" stroke-width="1.2" />
+      <circle cx="226" cy="18" r="5" fill="#0F9473" />
+      <text x="239" y="22" class="font-sans legend-txt">Claude 独立编码配额</text>
+    </g>
+  </g>
+
+  <!-- ==================== ROW 1: USER, CONDUCTOR, ADVISOR ==================== -->
+
+  <!-- User Card -->
+  <g filter="url(#cardShadow)" transform="translate(34, 128)">
+    <rect x="0" y="0" width="112" height="92" rx="14" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.6" />
+    <circle cx="56" cy="30" r="14" fill="#EFF4FF" stroke="#3B82F6" stroke-width="1.5" />
+    <circle cx="56" cy="26" r="4.5" fill="#2563EB" />
+    <path d="M 47 38 C 48.5 33, 63.5 33, 65 38" fill="none" stroke="#2563EB" stroke-width="2" stroke-linecap="round" />
+    <text x="56" y="61" text-anchor="middle" class="font-sans card-title" style="font-size:14px;">用户</text>
+    <text x="56" y="79" text-anchor="middle" class="font-sans edge-sub">需求 / 放宽审批</text>
+  </g>
+
+  <!-- Conductor Card -->
+  <g filter="url(#cardShadow)" transform="translate(204, 98)">
+    <rect x="0" y="0" width="352" height="148" rx="14" fill="#FFFFFF" stroke="#E0533C" stroke-width="2" />
+    <path d="M 14 0 L 338 0 Q 352 0 352 14 L 352 36 L 0 36 L 0 14 Q 0 0 14 0 Z" fill="#FFF2EF" />
+    <line x1="0" y1="36" x2="352" y2="36" stroke="#FAD7CF" stroke-width="1.2" />
+    <text x="16" y="24" class="font-sans card-title" fill="#B83B28">Conductor · 日常总控</text>
+    <rect x="246" y="8" width="92" height="20" rx="10" fill="#E0533C" />
+    <text x="292" y="22" text-anchor="middle" class="font-mono badge-txt" fill="#FFFFFF">agy 主会话</text>
+
+    <rect x="16" y="46" width="206" height="24" rx="6" fill="#FFF7F5" stroke="#F4B7AA" stroke-width="1" />
+    <text x="119" y="62" text-anchor="middle" class="font-mono badge-txt" fill="#B83B28">Gemini 4 Carbon (High)</text>
+
+    <text x="16" y="90" class="font-sans body">• 起草 brief.md / baton-scope / harness.md</text>
+    <text x="16" y="110" class="font-sans body">• 驱动状态机，按需调 baton advise，逐条 baton rule</text>
+    <text x="16" y="130" class="font-sans body" style="fill:#B83B28;font-weight:600;">• 严禁直接改代码，严禁跳过冷眼简报自审自裁</text>
+  </g>
+
+  <!-- Advisor Card -->
+  <g filter="url(#cardShadow)" transform="translate(778, 98)">
+    <rect x="0" y="0" width="380" height="148" rx="14" fill="#FFFFFF" stroke="#D98A16" stroke-width="2" />
+    <path d="M 14 0 L 366 0 Q 380 0 380 14 L 380 36 L 0 36 L 0 14 Q 0 0 14 0 Z" fill="#FFF9EB" />
+    <line x1="0" y1="36" x2="380" y2="36" stroke="#F6DFAC" stroke-width="1.2" />
+    <text x="16" y="24" class="font-sans card-title" fill="#9A5B06">Advisor · 首席设计与高阶终审</text>
+    <rect x="252" y="8" width="114" height="20" rx="10" fill="#D98A16" />
+    <text x="309" y="22" text-anchor="middle" class="font-mono badge-txt" fill="#FFFFFF">agy -p · 无状态</text>
+
+    <rect x="16" y="46" width="200" height="24" rx="6" fill="#FFFDF5" stroke="#F0CD7D" stroke-width="1" />
+    <text x="116" y="62" text-anchor="middle" class="font-mono badge-txt" fill="#9A5B06">Gemini 4 Neon (XHigh)</text>
+
+    <text x="16" y="90" class="font-sans body">• 开题门控 (design) · 关键决策 (decide) · 解阻 (unblock)</text>
+    <text x="16" y="110" class="font-sans body">• 终审 / 违例 / 连续≥2 REVISE 单轨冷眼直审 (audit)</text>
+    <text x="16" y="130" class="font-sans body">• 严格无状态冷启动，结果落盘 advice/A&lt;n&gt; 并入账</text>
+  </g>
+
+  <!-- ==================== ROW 2: EXECUTOR & BATON CLI ==================== -->
+
+  <!-- Executor Card -->
+  <g filter="url(#cardShadow)" transform="translate(204, 308)">
+    <rect x="0" y="0" width="352" height="148" rx="14" fill="#FFFFFF" stroke="#0F9473" stroke-width="2" />
+    <path d="M 14 0 L 338 0 Q 352 0 352 14 L 352 36 L 0 36 L 0 14 Q 0 0 14 0 Z" fill="#ECFDF7" />
+    <line x1="0" y1="36" x2="352" y2="36" stroke="#B7EEDB" stroke-width="1.2" />
+    <text x="16" y="24" class="font-sans card-title" fill="#0B6E55">Executor · 唯一代码写入者</text>
+    <rect x="242" y="8" width="96" height="20" rx="10" fill="#0F9473" />
+    <text x="290" y="22" text-anchor="middle" class="font-mono badge-txt" fill="#FFFFFF">claude -p</text>
+
+    <rect x="16" y="46" width="268" height="24" rx="6" fill="#F4FEFA" stroke="#9EE3CB" stroke-width="1" />
+    <text x="150" y="62" text-anchor="middle" class="font-mono badge-txt" fill="#0B6E55">Claude Opus (XHigh) · --safe-mode</text>
+
+    <text x="16" y="90" class="font-sans body">• 专注代码实现、实验脚本、调试与测试验证</text>
+    <text x="16" y="110" class="font-sans body">• --append-system-prompt 注入审定 harness</text>
+    <text x="16" y="130" class="font-sans body">• 禁用 Bash(baton *) / git push；违例后自动换新会话</text>
+  </g>
+
+  <!-- Baton CLI Deterministic Base + Single-Track Router -->
+  <g filter="url(#cardShadow)" transform="translate(698, 298)">
+    <rect x="0" y="0" width="460" height="168" rx="14" fill="#FFFFFF" stroke="#2B3F72" stroke-width="2" />
+    <path d="M 14 0 L 446 0 Q 460 0 460 14 L 460 36 L 0 36 L 0 14 Q 0 0 14 0 Z" fill="#EEF2FA" />
+    <line x1="0" y1="36" x2="460" y2="36" stroke="#CBD5E1" stroke-width="1.2" />
+    <text x="16" y="24" class="font-sans card-title" fill="#1E3058">Baton CLI · 0-Token 确定性底座</text>
+    <rect x="348" y="8" width="98" height="20" rx="10" fill="#2B3F72" />
+    <text x="397" y="22" text-anchor="middle" class="font-mono badge-txt" fill="#FFFFFF">0-Token 护栏</text>
+
+    <!-- 2x2 Chips -->
+    <rect x="16" y="48" width="208" height="32" rx="8" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.1" />
+    <text x="120" y="68" text-anchor="middle" class="font-sans chip-txt">L1 Watchdog (60s 冻结+流监控)</text>
+
+    <rect x="236" y="48" width="208" height="32" rx="8" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.1" />
+    <text x="340" y="68" text-anchor="middle" class="font-sans chip-txt">RED_FLAGS 静态 diff 扫描</text>
+
+    <rect x="16" y="88" width="208" height="32" rx="8" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.1" />
+    <text x="120" y="108" text-anchor="middle" class="font-sans chip-txt">亲跑验证 + 影子仓库回滚</text>
+
+    <rect x="236" y="88" width="208" height="32" rx="8" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.1" />
+    <text x="340" y="108" text-anchor="middle" class="font-sans chip-txt">封存只读卷宗 (chmod a-w)</text>
+
+    <!-- Single-track Router Bar -->
+    <rect x="16" y="130" width="428" height="26" rx="8" fill="#1E3058" />
+    <text x="230" y="147" text-anchor="middle" class="font-sans badge-txt" fill="#FFFFFF">单轨冷眼审计路由器：每份卷宗仅由一位冷眼角色审计（绝不叠罗汉）</text>
+  </g>
+
+  <!-- ==================== ROW 3: LEDGER & MONITOR ==================== -->
+
+  <!-- Hash-Chained Ledger Card -->
+  <g filter="url(#cardShadow)" transform="translate(204, 526)">
+    <rect x="0" y="0" width="352" height="122" rx="14" fill="#FFFDF7" stroke="#64748B" stroke-width="1.8" />
+    <path d="M 14 0 L 338 0 Q 352 0 352 14 L 352 34 L 0 34 L 0 14 Q 0 0 14 0 Z" fill="#F1F5F9" />
+    <line x1="0" y1="34" x2="352" y2="34" stroke="#CBD5E1" stroke-width="1.2" />
+    <text x="16" y="22.5" class="font-sans card-title" style="font-size:14.5px;">哈希链账本 &amp; 裁决门禁</text>
+    <rect x="246" y="7" width="92" height="20" rx="10" fill="#475569" />
+    <text x="292" y="21" text-anchor="middle" class="font-mono badge-txt" fill="#FFFFFF">baton rule</text>
+
+    <text x="16" y="57" class="font-sans body">• 统一接收 Monitor / Advisor 的 Findings (F1/F2...)</text>
+    <text x="16" y="77" class="font-sans body">• 绑定卷宗 SHA256；未逐条回应偏离禁止 resume/close</text>
+    <text x="16" y="97" class="font-sans body">• 归档 Brief / Verdict / Decision / Advice / Memory</text>
+  </g>
+
+  <!-- Monitor Card -->
+  <g filter="url(#cardShadow)" transform="translate(698, 526)">
+    <rect x="0" y="0" width="460" height="122" rx="14" fill="#FFFFFF" stroke="#7252DC" stroke-width="2" />
+    <path d="M 14 0 L 446 0 Q 460 0 460 14 L 460 34 L 0 34 L 0 14 Q 0 0 14 0 Z" fill="#F5F2FF" />
+    <line x1="0" y1="34" x2="460" y2="34" stroke="#D9CEFA" stroke-width="1.2" />
+    <text x="16" y="22.5" class="font-sans card-title" fill="#5436B8" style="font-size:14.5px;">Monitor · 常规冷眼审计</text>
+    <rect x="322" y="7" width="124" height="20" rx="10" fill="#7252DC" />
+    <text x="384" y="21" text-anchor="middle" class="font-mono badge-txt" fill="#FFFFFF">agy -p · 只读卷宗</text>
+
+    <rect x="16" y="43" width="236" height="23" rx="6" fill="#FAF8FF" stroke="#C9B8FA" stroke-width="1" />
+    <text x="134" y="58.5" text-anchor="middle" class="font-mono badge-txt" fill="#5436B8">Gemini 4 Hydrogen (XHigh)</text>
+
+    <text x="16" y="85" class="font-sans body">• 专审常规 REPORT 封存卷宗，跨家族核对 Claude 产出</text>
+    <text x="16" y="105" class="font-sans body">• 防锚定顺序：charter → evidence(RED_FLAGS) → diff → 最后 report</text>
+  </g>
+
+  <!-- ==================== CONNECTORS & LABELS ==================== -->
+
+  <!-- 1. User <-> Conductor -->
+  <line x1="150" y1="174" x2="199" y2="174" stroke="#475569" stroke-width="2" marker-start="url(#arrowNavy)" marker-end="url(#arrowNavy)" />
+
+  <!-- 2. Conductor -> Advisor (baton advise) -->
+  <line x1="558" y1="154" x2="772" y2="154" stroke="#C97E0A" stroke-width="2" marker-end="url(#arrowGold)" />
+  <rect x="570" y="126" width="192" height="23" rx="6" fill="#FFF9EB" stroke="#F0CD7D" stroke-width="1" />
+  <text x="666" y="141.5" text-anchor="middle" class="font-mono edge-lbl" style="fill:#9A5B06;font-size:10px;">baton advise design|decide</text>
+
+  <!-- 2b. Advisor -> Conductor (advice/A<n>) -->
+  <line x1="774" y1="196" x2="560" y2="196" stroke="#C97E0A" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrowGold)" />
+  <rect x="594" y="203" width="144" height="21" rx="5" fill="#FFFFFF" stroke="#F6DFAC" stroke-width="1" />
+  <text x="666" y="217" text-anchor="middle" class="font-sans edge-sub" style="fill:#9A5B06;">A&lt;n&gt; 意见 / 判例草案</text>
+
+  <!-- 3. Conductor -> Executor -->
+  <line x1="380" y1="248" x2="380" y2="302" stroke="#E0533C" stroke-width="2.2" marker-end="url(#arrowCoral)" />
+  <rect x="292" y="263" width="176" height="23" rx="6" fill="#FFF2EF" stroke="#F4B7AA" stroke-width="1" />
+  <text x="380" y="278.5" text-anchor="middle" class="font-mono edge-lbl" style="fill:#B83B28;font-size:10.5px;">start / resume / steer</text>
+
+  <!-- 4. Executor -> Baton CLI -->
+  <line x1="558" y1="382" x2="692" y2="382" stroke="#0F9473" stroke-width="2.2" marker-end="url(#arrowTeal)" />
+  <rect x="572" y="350" width="108" height="23" rx="6" fill="#ECFDF7" stroke="#9EE3CB" stroke-width="1" />
+  <text x="626" y="365.5" text-anchor="middle" class="font-mono edge-lbl" style="fill:#0B6E55;font-size:10.5px;">stream-json</text>
+  <text x="626" y="401" text-anchor="middle" class="font-mono edge-sub">leg-result JSON</text>
+
+  <!-- 5. Baton CLI UP -> Advisor (Single-Track Escalated Audit) -->
+  <line x1="968" y1="296" x2="968" y2="251" stroke="#C97E0A" stroke-width="2.2" marker-end="url(#arrowGold)" />
+  <rect x="788" y="260" width="360" height="23" rx="6" fill="#FFF9EB" stroke="#EAB308" stroke-width="1.1" />
+  <text x="968" y="275.5" text-anchor="middle" class="font-sans edge-lbl" style="fill:#9A5B06;font-size:10.5px;">终审 DONE / VIOLATION / 连续≥2 REVISE（跳过 Monitor）</text>
+
+  <!-- 6. Baton CLI DOWN -> Monitor (Single-Track Routine Audit) -->
+  <line x1="928" y1="468" x2="928" y2="520" stroke="#7252DC" stroke-width="2.2" marker-end="url(#arrowViolet)" />
+  <rect x="826" y="481" width="204" height="23" rx="6" fill="#F5F2FF" stroke="#C9B8FA" stroke-width="1.1" />
+  <text x="928" y="496.5" text-anchor="middle" class="font-sans edge-lbl" style="fill:#5436B8;font-size:10.5px;">常规 REPORT 封存卷宗</text>
+
+  <!-- 7. Monitor -> Ledger (Findings) -->
+  <line x1="696" y1="587" x2="561" y2="587" stroke="#7252DC" stroke-width="2.2" marker-end="url(#arrowViolet)" />
+  <rect x="570" y="556" width="116" height="23" rx="6" fill="#F5F2FF" stroke="#C9B8FA" stroke-width="1" />
+  <text x="628" y="571.5" text-anchor="middle" class="font-mono edge-lbl" style="fill:#5436B8;font-size:10.3px;">Findings F1/F2</text>
+  <text x="628" y="606" text-anchor="middle" class="font-sans edge-sub">+ 记忆候选建议</text>
+
+  <!-- 7b. Advisor audit -> Ledger (clean bottom return loop) -->
+  <path d="M 1158 172 L 1174 172 L 1174 676 L 380 676 L 380 653" fill="none" stroke="#C97E0A" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arrowGold)" />
+  <rect x="576" y="664" width="320" height="22" rx="6" fill="#FFF9EB" stroke="#F0CD7D" stroke-width="1" />
+  <text x="736" y="679" text-anchor="middle" class="font-sans edge-sub" style="fill:#9A5B06;">Advisor audit 复用同一套 Findings Schema 写入账本</text>
+
+  <!-- 8. Ledger -> Conductor (Verdict loop on left gutter) -->
+  <path d="M 202 587 L 172 587 L 172 218 L 200 218" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrowNavy)" />
+  <g transform="translate(154, 412) rotate(-90)">
+    <rect x="-66" y="-12" width="132" height="24" rx="6" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1" />
+    <text x="0" y="4" text-anchor="middle" class="font-sans edge-lbl" style="fill:#334155;font-size:10.5px;">baton rule 逐条裁决</text>
+  </g>
+</svg>
