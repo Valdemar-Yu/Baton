@@ -115,6 +115,9 @@ def short_reset(ts):
 
 def codex_line(session):
     ex = executor_config(session)
+    if str(ex.get("backend") or "").lower() == "claude":
+        head = c(f"Executor Claude {ex.get('model', 'opus')}·{ex.get('reasoning_effort', 'xhigh')}", "36")
+        return head
     head = c(f"Codex {ex.get('model', '?')}·{ex.get('reasoning_effort', '?')}", "36")
     data = codex_quota.get(block=False)
     if not data or not data.get("windows"):
@@ -221,7 +224,10 @@ def _latest_task(session):
 def idle_line(session):
     data = project_baton_json(session)
     mode = data.get("mode") or "standard"
-    head = f"Baton v2·{mode}" + (f"·{data['preset']}" if isinstance(data.get("preset"), str) and data["preset"] else "")
+    ver = f"v{data['version']}" if data.get("version") else (
+        "v3" if (data.get("advisor") or (data.get("executor") or {}).get("backend") == "claude") else "v2"
+    )
+    head = f"Baton {ver}·{mode}" + (f"·{data['preset']}" if isinstance(data.get("preset"), str) and data["preset"] else "")
     parts = [head, "空闲"]
     latest = _latest_task(session)
     if latest:

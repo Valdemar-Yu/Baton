@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "recommended_option", "tradeoffs", "draft_precedent", "needs_user_confirmation"],
+  "properties": {
+    "summary": {"type": "string"},
+    "recommended_option": {"type": "string"},
+    "tradeoffs": {"type": "array", "items": {"type": "string"}},
+    "draft_precedent": {"type": "string", "description": "Ready-to-record decision text for baton decide"},
+    "needs_user_confirmation": {"type": "boolean"}
+  }
+}

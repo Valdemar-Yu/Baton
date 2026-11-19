@@ -1,33 +1,58 @@
 {
-  "_comment": "Baton defaults. Configuration deep-merges in this order: this skill config.json, <project>/.baton/config.json, then <project>/baton.json. Project quota.* is ignored; quota is per account and read from this file only. BATON_QUOTA_WARN_PERCENT and BATON_DESKTOP_NOTIFY=0 override it per shell.",
+  "_comment": "Baton v3 defaults (Agy-core + Claude-coding Research Baton). Deep-merges: this skill config.json, <project>/.baton/config.json, then <project>/baton.json. Project quota.* is ignored.",
+  "version": 3,
   "conductor": {
-    "model": "gpt-6-astra",
-    "council_for_major_decisions": true,
-    "reasoning_effort": "ultra",
+    "backend": "agy",
+    "model": "gemini-4-carbon-high",
+    "reasoning_effort": "high",
+    "council_for_major_decisions": false,
     "service_tier": "priority",
     "disable_fast_mode": false
   },
+  "advisor": {
+    "enabled": true,
+    "backend": "agy",
+    "model": "gemini-4-neon-xhigh",
+    "reasoning_effort": "xhigh",
+    "timeout_minutes": 20,
+    "design_gate": true,
+    "escalate_on_revise_streak": 2,
+    "handle_final_audit": true,
+    "handle_violation_audit": true
+  },
   "monitor": {
-    "model": "gpt-5.6-luna",
-    "reasoning_effort": "max",
-    "final_reasoning_effort": "max",
-    "timeout_minutes": 40
+    "enabled": true,
+    "backend": "agy",
+    "model": "gemini-4-hydrogen-xhigh",
+    "reasoning_effort": "xhigh",
+    "final_reasoning_effort": "xhigh",
+    "timeout_minutes": 30,
+    "midleg_llm_checks": false,
+    "midleg_llm_on_alert": false
   },
   "executor": {
-    "backend": "codex",
+    "backend": "claude",
+    "model": "opus",
+    "reasoning_effort": "xhigh",
+    "permission_mode": "bypassPermissions",
+    "safe_mode": true,
+    "disallowed_tools": [
+      "Bash(baton *)",
+      "Bash(git push*)",
+      "Bash(rm -rf /*)"
+    ],
+    "max_legs_per_session": 4,
     "hermes_profile": "baton-exec-v2",
     "provider": "openai-codex",
     "toolsets": ["file", "terminal", "todo", "baton-memory"],
     "sandbox_exec": true,
-    "model": "gpt-6.1-sol",
-    "reasoning_effort": "ultra",
     "escalation": {
-      "enabled": true,
-      "model": "gpt-6.1-sol",
-      "reasoning_effort": "ultra",
+      "enabled": false,
+      "model": "opus",
+      "reasoning_effort": "max",
       "after_revise": 2,
       "after_blocked_or_failed_legs": 2,
-      "max_per_task": 3
+      "max_per_task": 2
     },
     "service_tier": "priority",
     "disable_fast_mode": false,
@@ -45,7 +70,7 @@
     "embedder": {"provider": "ollama", "model": "qwen3-embedding:0.6b", "num_ctx": 1024, "dims": 1024},
     "inject_top_k": 10,
     "core_max_chars": 2200,
-    "curation_model": "sonnet"
+    "curation_model": "gemini-4-hydrogen-high"
   },
   "mode": "standard",
   "supervision": {

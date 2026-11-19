@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "readiness", "risks", "missing_invariants", "recommended_freeze", "stop_criteria", "suggestions"],
+  "properties": {
+    "summary": {"type": "string", "description": "Concise executive assessment of the task brief and research design"},
+    "readiness": {"type": "string", "enum": ["ready", "revise_brief", "need_user_input"]},
+    "risks": {"type": "array", "items": {"type": "string"}, "description": "Scientific, methodological, or engineering risks"},
+    "missing_invariants": {"type": "array", "items": {"type": "string"}, "description": "Data-leakage guards, eval invariants, or reproducibility checks missing from the brief"},
+    "recommended_freeze": {"type": "array", "items": {"type": "string"}, "description": "Paths that should be frozen or listed in acceptance/frozen"},
+    "stop_criteria": {"type": "array", "items": {"type": "string"}, "description": "Clear abort/pivot conditions if hypotheses fail"},
+    "suggestions": {"type": "array", "items": {"type": "string"}, "description": "Concrete actionable revisions to brief.md or harness.md"}
+  }
+}

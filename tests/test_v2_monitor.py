@@ -57,6 +57,7 @@ class MonitorTests(unittest.TestCase):
         self.project_root.mkdir()
         subprocess.run(["git", "init", "-q", str(self.project_root)], check=True)
         (self.project_root / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (self.project_root / "baton.json").write_text(json.dumps({"executor": {"backend": "codex"}}), encoding="utf-8")
         (self.project_root / ".baton" / "tasks" / "t").mkdir(parents=True)
         (self.project_root / ".baton" / "tasks" / "t" / "brief.md").write_text(
             "```baton-scope\n" + json.dumps({"allow": ["a.py"], "deny": [], "acceptance": [],

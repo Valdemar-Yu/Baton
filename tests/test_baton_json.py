@@ -69,11 +69,13 @@ class BatonJsonTests(unittest.TestCase):
         tmp, root, project = self.project()
         self.addCleanup(tmp.cleanup)
         cfg = project.config
-        self.assertEqual(cfg["conductor"]["model"], "gpt-6-astra")
-        self.assertTrue(cfg["conductor"]["council_for_major_decisions"])
-        self.assertEqual(cfg["executor"]["backend"], "codex")
-        self.assertEqual(cfg["executor"]["model"], "gpt-6.1-sol")
-        self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-luna")
+        self.assertEqual(cfg["conductor"]["model"], "gemini-4-carbon-high")
+        self.assertTrue(cfg["advisor"]["enabled"])
+        self.assertEqual(cfg["advisor"]["model"], "gemini-4-neon-xhigh")
+        self.assertEqual(cfg["executor"]["backend"], "claude")
+        self.assertEqual(cfg["executor"]["model"], "opus")
+        self.assertEqual(cfg["monitor"]["backend"], "agy")
+        self.assertEqual(cfg["monitor"]["model"], "gemini-4-hydrogen-xhigh")
 
     def test_invalid_baton_json_is_an_error(self):
         tmp, root, project = self.project()
@@ -101,7 +103,8 @@ class BatonJsonTests(unittest.TestCase):
         self.assertTrue(path.exists())
         first = path.read_text(encoding="utf-8")
         data = json.loads(first)
-        self.assertEqual(data["conductor"], {"model": "gpt-6-astra", "council_for_major_decisions": True})
+        self.assertEqual(data["conductor"]["model"], "gpt-6-astra")
+        self.assertTrue(data["conductor"]["council_for_major_decisions"])
         self.assertNotIn("judge", data)
         self.assertEqual(data["monitor"]["model"], "gpt-5.6-luna")
         self.assertEqual(data["executor"]["backend"], "codex")
@@ -299,7 +302,8 @@ class BatonJsonTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             baton.cmd_init(project, Namespace(no_statusline=True))
         cfg = json.loads((root / "baton.json").read_text())
-        self.assertEqual(cfg["conductor"], {"model": "haiku", "council_for_major_decisions": False})
+        self.assertEqual(cfg["conductor"]["model"], "haiku")
+        self.assertFalse(cfg["conductor"]["council_for_major_decisions"])
         self.assertEqual(cfg["monitor"]["model"], "gpt-5.6-luna")
         self.assertNotIn("judge", cfg)
         self.assertEqual(cfg["executor"]["backend"], "codex")

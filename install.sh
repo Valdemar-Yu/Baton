@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# install.sh — install Baton for Claude Code.
+# install.sh — install Baton v3 for Antigravity CLI (`agy`) and Claude Code.
 #
-#   ./install.sh             skill (~/.claude/skills/baton) + `baton` CLI (~/.local/bin/baton)
+#   ./install.sh             skill (~/.gemini/config/skills/baton + ~/.claude/skills/baton) + `baton` CLI (~/.local/bin/baton) + agy statusline
+#   ./install.sh --agy       only Antigravity CLI skill (~/.gemini/config/skills/baton) + agy statusline (~/.local/share/agy-statusline/statusline.py)
 #   ./install.sh --council   only council.skill with Baton's councilor backends
 #   ./install.sh --council-codex  only the Codex council skill
-#   ./install.sh --all       Baton + Claude council + Codex council
+#   ./install.sh --all       Baton (agy + Claude) + Claude council + Codex council
 #
-# The Codex quota statusline is configured per project by `baton init` (or `baton statusline install`).
 # Re-running is safe: an existing non-symlink skill dir, a `baton` command that is not Baton's,
 # an existing council setup and an existing council-def.sh are all left alone.
 set -euo pipefail
@@ -14,6 +14,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_SRC="${REPO}/skills/baton"
 SKILLS_DIR="${CLAUDE_SKILLS_DIR:-${HOME}/.claude/skills}"
+AGY_SKILLS_DIR="${AGY_SKILLS_DIR:-${HOME}/.gemini/config/skills}"
+AGY_STATUSLINE_DIR="${AGY_STATUSLINE_DIR:-${HOME}/.local/share/agy-statusline}"
 BIN_DIR="${BATON_BIN_DIR:-${HOME}/.local/bin}"
 # council.sh reads its backends from here (same default and override as council.skill itself)
 COUNCIL_DEF="${COUNCILOR_LIB:-${HOME}/.local/bin/council-def.sh}"
@@ -56,18 +58,46 @@ install_skill() {
     echo "CLI     ${cli} -> ${SKILL_SRC}/bin/baton"
   fi
   case ":${PATH}:" in *":${BIN_DIR}:"*) ;; *) echo "提示：${BIN_DIR} 不在 PATH 中，请加入 shell 配置" ;; esac
-  command -v codex >/dev/null || echo "提示：没有找到 codex CLI（npm i -g @openai/codex，然后 codex login）"
+  if command -v agy >/dev/null; then
+    echo "agy     已找到：$(command -v agy)"
+  else
+    echo "提示：没有找到 agy CLI（Antigravity CLI，v3 Conductor/Advisor/Monitor 核心依赖）"
+  fi
+  if command -v claude >/dev/null; then
+    echo "Claude  已找到：$(command -v claude)"
+  else
+    echo "提示：没有找到 claude CLI（v3 默认 Claude Opus XHigh Executor）"
+  fi
+  command -v codex >/dev/null || echo "提示：没有找到 codex CLI（仅 v2-codex 预设需要）"
   if command -v ollama >/dev/null; then
     echo "Ollama  已找到：$(command -v ollama)"
   else
-    echo "提示：没有找到 Ollama，请安装并启动 Ollama，再准备 qwen3-embedding:0.6b"
+    echo "提示：没有找到 Ollama（可选，用于 mem0 本地语义记忆 qwen3-embedding:0.6b）"
   fi
   if command -v hermes >/dev/null; then
     echo "Hermes  已找到：$(command -v hermes)"
   else
-    echo "提示：没有找到 hermes，请安装 Hermes 并创建 baton-exec-v2 profile"
+    echo "提示：没有找到 hermes（仅 v2 Hermes 预设需要）"
   fi
-  echo "下一步（不会自动执行）：baton memory install；baton init"
+  install_agy
+  echo "下一步（不会自动执行）：baton init；可选 baton memory install"
+}
+
+install_agy() {
+  mkdir -p "${AGY_SKILLS_DIR}" "${AGY_STATUSLINE_DIR}"
+  chmod +x "${SKILL_SRC}/scripts/agy_statusline.py"
+  local agy_dst="${AGY_SKILLS_DIR}/baton"
+  if [[ -e "${agy_dst}" && ! -L "${agy_dst}" ]]; then
+    echo "跳过：${agy_dst} 已存在且不是软链接，请先移走再安装" >&2
+    STATUS=1
+  else
+    ln -sfn "${SKILL_SRC}" "${agy_dst}"
+    echo "agy     ${agy_dst} -> ${SKILL_SRC}"
+  fi
+  local sl_dst="${AGY_STATUSLINE_DIR}/statusline.py"
+  cp "${SKILL_SRC}/scripts/agy_statusline.py" "${sl_dst}"
+  chmod +x "${sl_dst}"
+  echo "status  ${sl_dst}（在 agy 中运行 /statusline python3 ${sl_dst} 即可启用）"
 }
 
 install_council() {
@@ -157,10 +187,11 @@ print(" ".join(n))' "${dst}/config.json" 2>/dev/null || echo "")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skill) install_skill; shift ;;
+    --agy) install_agy; shift ;;
     --council) install_council; shift ;;
     --council-codex) install_council_codex; shift ;;
     --all) install_skill; install_council; install_council_codex; shift ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
 done

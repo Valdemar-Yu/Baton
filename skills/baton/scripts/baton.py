@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 import tarfile
+import uuid
 import xml.etree.ElementTree as ET
 
 import baton_platform as platform_support
@@ -45,6 +46,7 @@ REFERENCES = os.path.join(SKILL_DIR, "references")
 sys.path.insert(0, HERE)
 import codex_quota  # noqa: E402
 import statusline as baton_statusline  # noqa: E402
+import v3_research  # noqa: E402
 
 # Baton's own records never count as code: not at the top, and not in a nested project either.
 EXCLUDE = [":(exclude,glob)**/.baton/**", ":(exclude,glob)**/.council/**",
@@ -79,7 +81,9 @@ GIT_LOCAL_ENV_VARS = (
 TASK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}")
 HERMES_PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-EXECUTOR_BACKENDS = {"codex", "hermes"}
+EXECUTOR_BACKENDS = {"codex", "hermes", "claude"}
+MONITOR_BACKENDS = {"codex", "hermes", "claude", "agy"}
+ADVISOR_BACKENDS = {"agy", "claude", "codex"}
 BATON_GITIGNORE = ["runs/", "*.lock", "statusline-saved.json", "tasks/*/state.json", "rollback-backup/", "project-id"]
 _DETACHED_RUNNERS = []
 STARTUP_GRACE_SECONDS = 30
@@ -268,15 +272,29 @@ class ConfigError(Exception):
 
 # Models accepted for the main conductor session. Keep Claude aliases separate
 # because they also select the Claude monitor transport.
-CONDUCTOR_MODELS = {"opus", "sonnet", "haiku", "fable", "gpt-6-astra"}
+CONDUCTOR_MODELS = {
+    "opus", "sonnet", "haiku", "fable", "gpt-6-astra",
+    "gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low",
+    "gemini-4-neon-high", "gemini-4-neon-xhigh", "gemini-4-neon-medium", "gemini-4-neon-low",
+    "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low",
+    "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low",
+}
 CLAUDE_MONITOR_MODELS = {"opus", "sonnet", "haiku", "fable"}
 MODES = {"standard", "lean"}
 CAPACITY_RETRY_DEFAULTS = {"immediate": 3, "delayed": 1, "delayed_minutes": 15}
 
 
+def _valid_conductor_model(model):
+    if not isinstance(model, str) or not model.strip():
+        return False
+    m = model.strip()
+    return m in CONDUCTOR_MODELS or m.startswith("gemini-")
+
+
 def lean_overrides():
     return {
         "conductor": {"reasoning_effort": "medium"},
+        "advisor": {"enabled": False},
         "executor": {
             "model": "gpt-5.6-luna",
             "reasoning_effort": "medium",
@@ -298,18 +316,52 @@ def validate_config(cfg):
             raise ConfigError(f"配置中的 {role} 必须是 JSON object")
         model = section.get("model")
         if role == "conductor":
-            if not isinstance(model, str) or model not in CONDUCTOR_MODELS:
+            if not _valid_conductor_model(model):
                 raise ConfigError(
-                    f"conductor.model 的值 {model!r} 无效，只能是 opus、sonnet、haiku、fable 或 gpt-6-astra"
+                    f"conductor.model 的值 {model!r} 无效，只能是 gemini-*、opus、sonnet、haiku、fable 或 gpt-6-astra"
                 )
         elif not isinstance(model, str) or not model.strip():
             raise ConfigError("monitor.model 必须是非空字符串")
+    advisor = cfg.get("advisor")
+    if advisor is not None:
+        if not isinstance(advisor, dict):
+            raise ConfigError("配置中的 advisor 必须是 JSON object")
+        if "enabled" in advisor and not isinstance(advisor["enabled"], bool):
+            raise ConfigError("advisor.enabled 必须是布尔值")
+        adv_backend = str(advisor.get("backend") or "agy").strip().lower()
+        if adv_backend not in ADVISOR_BACKENDS:
+            raise ConfigError(f"advisor.backend 的值 {adv_backend!r} 无效，只能是 agy、claude 或 codex")
+        if advisor.get("enabled", False):
+            adv_model = advisor.get("model")
+            if not isinstance(adv_model, str) or not adv_model.strip():
+                raise ConfigError("advisor.model 必须是非空字符串")
+        adv_timeout = advisor.get("timeout_minutes", 20)
+        if isinstance(adv_timeout, bool) or not isinstance(adv_timeout, (int, float)) or not math.isfinite(adv_timeout) or adv_timeout <= 0:
+            raise ConfigError("advisor.timeout_minutes 必须是大于 0 的有限数字")
+        streak = advisor.get("escalate_on_revise_streak", 2)
+        if isinstance(streak, bool) or not isinstance(streak, int) or streak < 1:
+            raise ConfigError("advisor.escalate_on_revise_streak 必须是正整数")
+        for bkey in ("design_gate", "handle_final_audit", "handle_violation_audit"):
+            if bkey in advisor and not isinstance(advisor[bkey], bool):
+                raise ConfigError(f"advisor.{bkey} 必须是布尔值")
+    mon_backend = str(cfg["monitor"].get("backend") or "codex").strip().lower()
+    if mon_backend not in MONITOR_BACKENDS:
+        raise ConfigError(f"monitor.backend 的值 {mon_backend!r} 无效，只能是 codex、hermes、claude 或 agy")
+    for bkey in ("midleg_llm_checks", "midleg_llm_on_alert"):
+        if bkey in cfg["monitor"] and not isinstance(cfg["monitor"][bkey], bool):
+            raise ConfigError(f"monitor.{bkey} 必须是布尔值")
     if not isinstance(cfg.get("executor"), dict):
         raise ConfigError("配置中的 executor 必须是 JSON object")
     executor = cfg["executor"]
     backend = executor.get("backend", "codex")
     if not isinstance(backend, str) or backend not in EXECUTOR_BACKENDS:
-        raise ConfigError(f"executor.backend 的值 {backend!r} 无效，只能是 codex 或 hermes")
+        raise ConfigError(f"executor.backend 的值 {backend!r} 无效，只能是 codex、hermes 或 claude")
+    if "safe_mode" in executor and not isinstance(executor["safe_mode"], bool):
+        raise ConfigError("executor.safe_mode 必须是布尔值")
+    if "disallowed_tools" in executor:
+        dt = executor["disallowed_tools"]
+        if not isinstance(dt, list) or any(not isinstance(x, str) or not x.strip() for x in dt):
+            raise ConfigError("executor.disallowed_tools 必须是非空字符串数组")
     profile = executor.get("hermes_profile", "baton-exec-v2")
     if not isinstance(profile, str) or not HERMES_PROFILE_RE.fullmatch(profile):
         raise ConfigError("executor.hermes_profile 必须是小写字母、数字、下划线或连字符，且以字母或数字开头")
@@ -1575,8 +1627,26 @@ def _evidence_text(project, task, st, leg, dossier_kind, baseline):
         lines.append("monitor 带着用户的 Codex 全局指令（~/.codex/AGENTS.md）")
     elif probe.get("codex_global_instructions") is None:
         lines.append("monitor 隔离情况未经探针确认")
-    lines += ["", "## Diff", f"本轮改动：{leg.get('diff') or '无'}"]
     store = project.store(task, st)
+    diff_patch_for_scan = ""
+    if store and baseline and leg.get("end_ref"):
+        diff_patch_for_scan = store.git("diff", baseline, leg["end_ref"], "--", ".", *code_excludes(store), check=False)
+    red_flags = v3_research.scan_diff_red_flags(diff_patch_for_scan)
+    lines += ["", v3_research.format_red_flags_section(red_flags)]
+    claude_meta = leg.get("claude_meta")
+    if isinstance(claude_meta, dict) and claude_meta:
+        meta_bits = []
+        if claude_meta.get("model"):
+            meta_bits.append(f"model={claude_meta['model']}")
+        if claude_meta.get("num_turns"):
+            meta_bits.append(f"turns={claude_meta['num_turns']}")
+        if claude_meta.get("total_cost_usd") is not None:
+            meta_bits.append(f"cost=${float(claude_meta['total_cost_usd']):.4f}")
+        if claude_meta.get("permission_denials"):
+            meta_bits.append(f"permission_denials={len(claude_meta['permission_denials'])}")
+        if meta_bits:
+            lines += ["", "## Executor 运行遥测（Claude Code）", ", ".join(meta_bits)]
+    lines += ["", "## Diff", f"本轮改动：{leg.get('diff') or '无'}"]
     if store and baseline and leg.get("end_ref"):
         lines.append(store.git("diff", "--stat=120", baseline, leg["end_ref"], "--", ".", *code_excludes(store), check=False).rstrip() or "（无）")
         lines.append("\n按文件摘要：")
@@ -2088,8 +2158,83 @@ def monitor_prompt_for(cfg, prompt, schema_path):
 
 
 def monitor_backend(cfg):
-    """codex (default; Claude aliases run through the Claude CLI) or hermes."""
-    return str((cfg.get("monitor") or {}).get("backend") or "codex").strip().lower()
+    """codex (default; Claude aliases run through the Claude CLI), hermes, claude, or agy."""
+    mon = cfg.get("monitor") or {}
+    explicit = str(mon.get("backend") or "").strip().lower()
+    if explicit:
+        return explicit
+    model = str(mon.get("model") or "").strip()
+    if model in CLAUDE_MONITOR_MODELS:
+        return "claude"
+    if model.startswith("gemini-"):
+        return "agy"
+    return "codex"
+
+
+def _monitor_agy_command(project, dossier_id, cfg, prompt, schema_path=None, settings_path=None):
+    """Isolated read-only Antigravity CLI (`agy -p`) invocation for Monitor or Advisor."""
+    mon = cfg.get("monitor") or {}
+    model = mon.get("model") or "gemini-4-hydrogen-xhigh"
+    timeout_sec = max(30, int(float(mon.get("timeout_minutes", 30)) * 60))
+    schema = schema_path or os.path.join(TEMPLATES, "monitor-brief.schema.json")
+    cmd = [
+        platform_support.executable("agy"),
+        "--model", str(model),
+        "--sandbox",
+        "--disable-slash-commands",
+        "--output-format", "json",
+        "--json-schema", schema,
+        "--print-timeout", f"{timeout_sec}s",
+    ]
+    if settings_path:
+        cmd += ["--settings", settings_path]
+    cmd += ["-p", str(prompt)]
+    return cmd
+
+
+def select_auditor_for_dossier(project, task, dossier_kind, cfg, force_auditor=None):
+    """Single-track cold-eye audit router (Baton v3):
+    Every sealed dossier is audited by exactly ONE cold-eye role — never double-audited.
+    - Routine REPORT -> Monitor (e.g. gemini-4-hydrogen-xhigh)
+    - FINAL / VIOLATION / >=N consecutive REVISE -> Advisor (e.g. gemini-4-neon-xhigh) directly.
+    Returns (role, effective_cfg, route_reason).
+    """
+    advisor = (cfg or {}).get("advisor") or {}
+    if dossier_kind == "curation" or force_auditor == "monitor" or not advisor.get("enabled"):
+        mon = (cfg or {}).get("monitor") or {}
+        return "monitor", cfg, f"常规冷眼审计（{mon.get('model', '?')}）"
+
+    reason = ""
+    if force_auditor == "advisor":
+        reason = "显式指定 Advisor 审计（baton advise audit）"
+    elif dossier_kind == "final" and advisor.get("handle_final_audit", True):
+        reason = "终审直达 Advisor（单轨冷眼，跳过 Monitor）"
+    elif dossier_kind == "violation" and advisor.get("handle_violation_audit", True):
+        reason = "违例直达 Advisor（单轨冷眼，跳过 Monitor）"
+    elif dossier_kind == "report":
+        streak_limit = int(advisor.get("escalate_on_revise_streak", 2) or 2)
+        revise_streak = 0
+        for conclusion in reversed(_verdict_conclusions_for_task(project, task)):
+            if conclusion == "REVISE":
+                revise_streak += 1
+            else:
+                break
+        if revise_streak >= streak_limit:
+            reason = f"连续 {revise_streak} 次 REVISE 直升 Advisor（单轨冷眼）"
+
+    if not reason:
+        mon = (cfg or {}).get("monitor") or {}
+        return "monitor", cfg, f"常规冷眼审计（{mon.get('model', '?')}）"
+
+    routed = json.loads(json.dumps(cfg))
+    routed["monitor"] = dict(routed.get("monitor") or {})
+    routed["monitor"]["backend"] = advisor.get("backend", "agy")
+    routed["monitor"]["model"] = advisor.get("model", "gemini-4-neon-xhigh")
+    routed["monitor"]["reasoning_effort"] = advisor.get("reasoning_effort", "xhigh")
+    routed["monitor"]["final_reasoning_effort"] = advisor.get("reasoning_effort", "xhigh")
+    if advisor.get("timeout_minutes"):
+        routed["monitor"]["timeout_minutes"] = advisor["timeout_minutes"]
+    return "advisor", routed, reason
 
 
 def require_supported_monitor(cfg):
@@ -2166,8 +2311,11 @@ def _monitor_effort(cfg, dossier_kind):
     return monitor_cfg.get("reasoning_effort")
 
 
-def _monitor_result_from_files(project, dossier_id, model, output_path, stdout):
-    if model in CLAUDE_MONITOR_MODELS:
+def _monitor_result_from_files(project, dossier_id, model, output_path, stdout, backend=None):
+    if backend == "agy":
+        value, _meta, err = v3_research.parse_agy_json_output(stdout)
+        return (value, "") if value is not None else (None, err or "agy 没有输出 JSON 简报")
+    if model in CLAUDE_MONITOR_MODELS or backend == "claude":
         try:
             value = json.loads(stdout or "")
         except (TypeError, ValueError):
@@ -2230,11 +2378,18 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
     require_supported_monitor(cfg)
     curation = dossier_kind == "curation"
     schema_path = os.path.join(TEMPLATES, "monitor-curation.schema.json" if curation else "monitor-brief.schema.json")
-    if model in CLAUDE_MONITOR_MODELS:
+    backend = monitor_backend(cfg)
+    uses_pipe_stdout = (model in CLAUDE_MONITOR_MODELS) or backend in ("claude", "agy")
+    if model in CLAUDE_MONITOR_MODELS or backend == "claude":
         env.update({"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                     "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
         command = _monitor_claude_command(project, dossier_id, cfg, effort, schema_path=schema_path)
-    elif monitor_backend(cfg) == "hermes":
+    elif backend == "agy":
+        iso_settings = v3_research.write_isolated_agy_settings(os.path.join(out_dir, "isolated-agy.json"))
+        command = _monitor_agy_command(project, dossier_id, cfg, prompt, schema_path=schema_path,
+                                       settings_path=iso_settings)
+        prompt = None
+    elif backend == "hermes":
         prepare_monitor_hermes_profile(project, cfg)
         prompt = monitor_prompt_for(cfg, prompt, schema_path)
         command = _monitor_hermes_command(project, dossier_id, cfg, effort, prompt)
@@ -2254,8 +2409,9 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
     event_stream = error_stream = None
     stdout = stderr = ""
     try:
-        if model in CLAUDE_MONITOR_MODELS:
-            proc = platform_support.detached_popen(command, cwd=dossier_path(project, dossier_id), stdin=subprocess.PIPE,
+        if uses_pipe_stdout:
+            proc = platform_support.detached_popen(command, cwd=dossier_path(project, dossier_id),
+                                    stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
                                     encoding="utf-8")
         else:
@@ -2284,7 +2440,7 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
             event_stream.close()
         if error_stream:
             error_stream.close()
-        if model in CLAUDE_MONITOR_MODELS:
+        if uses_pipe_stdout:
             stdout = stdout or ""
             stderr = stderr or ""
         else:
@@ -2295,7 +2451,7 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
             event_stream.close()
         if error_stream:
             error_stream.close()
-    if model in CLAUDE_MONITOR_MODELS:
+    if uses_pipe_stdout:
         with open(stdout_path, "w", encoding="utf-8") as stream:
             stream.write(stdout or "")
         with open(stderr_path, "w", encoding="utf-8") as stream:
@@ -2312,7 +2468,7 @@ def run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n
         if failure_kind == "capacity":
             return None, "monitor 容量不足", attempt, "capacity"
         return None, (stderr or "monitor 进程失败").strip()[-1000:], attempt, "process"
-    value, error = _monitor_result_from_files(project, dossier_id, model, output_path, stdout)
+    value, error = _monitor_result_from_files(project, dossier_id, model, output_path, stdout, backend=backend)
     read_error = _monitor_read_error(value)
     if read_error:
         return None, read_error, attempt, "infrastructure"
@@ -2344,11 +2500,18 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
     effort = _monitor_effort(cfg, "report")
     env = dict(os.environ)
     require_supported_monitor(cfg)
-    if model in CLAUDE_MONITOR_MODELS:
+    backend = monitor_backend(cfg)
+    uses_pipe_stdout = (model in CLAUDE_MONITOR_MODELS) or backend in ("claude", "agy")
+    if model in CLAUDE_MONITOR_MODELS or backend == "claude":
         env.update({"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                     "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
         command = _monitor_claude_command(project, dossier_id, cfg, effort, schema_path=schema_path)
-    elif monitor_backend(cfg) == "hermes":
+    elif backend == "agy":
+        iso_settings = v3_research.write_isolated_agy_settings(os.path.join(out_dir, "isolated-agy.json"))
+        command = _monitor_agy_command(project, dossier_id, cfg, prompt, schema_path=schema_path,
+                                       settings_path=iso_settings)
+        prompt = None
+    elif backend == "hermes":
         prepare_monitor_hermes_profile(project, cfg)
         prompt = monitor_prompt_for(cfg, prompt, schema_path)
         command = _monitor_hermes_command(project, dossier_id, cfg, effort, prompt)
@@ -2367,8 +2530,9 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
     event_stream = error_stream = None
     stdout = stderr = ""
     try:
-        if model in CLAUDE_MONITOR_MODELS:
-            proc = platform_support.detached_popen(command, cwd=dossier_path(project, dossier_id), stdin=subprocess.PIPE,
+        if uses_pipe_stdout:
+            proc = platform_support.detached_popen(command, cwd=dossier_path(project, dossier_id),
+                                    stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
                                     encoding="utf-8")
         else:
@@ -2399,7 +2563,7 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
             event_stream.close()
         if error_stream:
             error_stream.close()
-    if model in CLAUDE_MONITOR_MODELS:
+    if uses_pipe_stdout:
         _dossier_write(stdout_path, stdout or "")
         _dossier_write(stderr_path, stderr or "")
     else:
@@ -2414,7 +2578,11 @@ def run_monitor_check_once(project, task, dossier_id, cfg, prompt, leg_n=None):
         if failure_kind == "capacity":
             return None, "轮中检查容量不足", attempt, "capacity"
         return None, (stderr or "轮中检查进程失败").strip()[-1000:], attempt, "process"
-    if model in CLAUDE_MONITOR_MODELS:
+    if backend == "agy":
+        value, _meta, agy_err = v3_research.parse_agy_json_output(stdout)
+        if value is None:
+            return None, agy_err or "agy 轮中检查没有输出 JSON", attempt, None
+    elif model in CLAUDE_MONITOR_MODELS or backend == "claude":
         try:
             wrapper = json.loads(stdout or "")
         except (TypeError, ValueError):
@@ -2689,6 +2857,10 @@ def maybe_start_monitor_check(project, task, st, leg, force=False):
     cfg = config_for_state(project, st)
     if not monitor_enabled(cfg) or cfg.get("mode") == "lean" or not leg or leg.get("status") != "running":
         return False
+    mon_cfg = cfg.get("monitor") or {}
+    if mon_cfg.get("midleg_llm_checks", True) is False:
+        if not (force and mon_cfg.get("midleg_llm_on_alert", False)):
+            return False
     if force:
         existing = leg.get("monitor_check") or {}
         now_value = now()
@@ -2921,12 +3093,16 @@ def _quota_reset_text():
     return ""
 
 
-def run_monitor_lifecycle(project, task, dossier_id, dossier_kind, cfg, leg_n, original_status):
-    """Run the isolated monitor, retrying one invalid response and recording its verdict."""
+def run_monitor_lifecycle(project, task, dossier_id, dossier_kind, cfg, leg_n, original_status, force_auditor=None):
+    """Run the isolated cold-eye auditor (Monitor or single-track Advisor), retrying once on invalid schema."""
+    auditor_role, effective_cfg, route_reason = select_auditor_for_dossier(
+        project, task, dossier_kind, cfg, force_auditor=force_auditor
+    )
+    auditor_model = (effective_cfg.get("monitor") or {}).get("model", "")
     base_prompt = read_text(os.path.join(dossier_path(project, dossier_id), "MONITOR_PROMPT.md"))
     prompt = base_prompt
     errors = []
-    retry_cfg = capacity_retry_config(cfg)
+    retry_cfg = capacity_retry_config(effective_cfg)
     immediate_used = delayed_used = 0
     schema_attempt = 0
     while schema_attempt < 2:
@@ -2939,7 +3115,7 @@ def run_monitor_lifecycle(project, task, dossier_id, dossier_kind, cfg, leg_n, o
             if not good:
                 _monitor_state_update(project, task, dossier_id, leg_n, "failed", error=integrity_error)
                 return False
-            brief, error, attempt, failure_kind = run_monitor_once(project, task, dossier_id, dossier_kind, cfg, prompt, leg_n)
+            brief, error, attempt, failure_kind = run_monitor_once(project, task, dossier_id, dossier_kind, effective_cfg, prompt, leg_n)
             if brief is None and failure_kind in ("timeout", "process", "infrastructure", "quota"):
                 terminal_error = error or "monitor 进程失败"
                 terminal_kind = failure_kind
@@ -2958,12 +3134,13 @@ def run_monitor_lifecycle(project, task, dossier_id, dossier_kind, cfg, leg_n, o
         if capacity_error:
             errors = [_monitor_capacity_error(capacity_error)]
             _monitor_state_update(project, task, dossier_id, leg_n, "failed", error="；".join(errors),
-                                  failure_kind="capacity")
+                                  failure_kind="capacity", auditor=auditor_role, auditor_model=auditor_model)
             break
         if terminal_error:
             errors = [_monitor_capacity_error(terminal_error) if terminal_kind == "quota" else terminal_error]
             extra = {"failure_kind": terminal_kind} if terminal_kind == "quota" else {}
-            _monitor_state_update(project, task, dossier_id, leg_n, "failed", error="；".join(errors), **extra)
+            _monitor_state_update(project, task, dossier_id, leg_n, "failed", error="；".join(errors),
+                                  auditor=auditor_role, auditor_model=auditor_model, **extra)
             break
         if brief is not None:
             good, integrity_error = verify_dossier(project, dossier_id, require_code=True)
@@ -2972,28 +3149,35 @@ def run_monitor_lifecycle(project, task, dossier_id, dossier_kind, cfg, leg_n, o
                 return False
             legs_for_rerun = (project.read_state(task, {}) or {}).get("legs") or [{}]
             rerun = bool((legs_for_rerun[-1] or {}).get("monitor", {}).get("rerun"))
-            brief_text = render_monitor_brief(project, task, dossier_id, brief, rerun=rerun)
+            brief_text = render_monitor_brief(project, task, dossier_id, brief, rerun=rerun,
+                                              auditor_role=auditor_role, auditor_model=auditor_model,
+                                              route_reason=route_reason)
             review_path = project.p("reviews", dossier_id + "-brief.md")
             os.makedirs(os.path.dirname(review_path), exist_ok=True)
             with open(review_path, "w", encoding="utf-8") as stream:
                 stream.write(brief_text)
             manifest = dossier_manifest(project, dossier_id)
             record = append_brief_ledger(project, task, dossier_id, manifest.get("total_sha256", ""),
-                                         brief_text, rerun=rerun, brief_json=brief)
+                                         brief_text, rerun=rerun, brief_json=brief,
+                                         auditor=auditor_role, auditor_model=auditor_model,
+                                         route_reason=route_reason)
             _monitor_state_update(project, task, dossier_id, leg_n, "completed", brief_path=review_path,
                                   recommendation=brief.get("recommendation"), summary=brief.get("summary", ""),
                                   findings=len(brief.get("findings") or []),
                                   blocking=sum(1 for x in brief.get("findings") or [] if x.get("severity") == "blocking"),
                                   note=sum(1 for x in brief.get("findings") or [] if x.get("severity") == "note"),
-                                  ledger_seq=record.get("seq"))
+                                  ledger_seq=record.get("seq"),
+                                  auditor=auditor_role, auditor_model=auditor_model, route_reason=route_reason)
             return True
         errors = [error or "monitor 没有交出有效简报"]
         schema_attempt += 1
-    _monitor_state_update(project, task, dossier_id, leg_n, "failed", error="；".join(errors))
+    _monitor_state_update(project, task, dossier_id, leg_n, "failed", error="；".join(errors),
+                          auditor=auditor_role, auditor_model=auditor_model)
     return False
 
 
-def render_monitor_brief(project, task, dossier_id, brief, rerun=False):
+def render_monitor_brief(project, task, dossier_id, brief, rerun=False, auditor_role="monitor",
+                         auditor_model="", route_reason=""):
     manifest = dossier_manifest(project, dossier_id) if os.path.isdir(dossier_path(project, dossier_id)) else {}
     if manifest.get("type") == "curation":
         lines = [f"# 记忆整理简报 · {dossier_id}", "", f"任务：`{task}`", "", "## 摘要", brief.get("summary", ""), "", "## 操作"]
@@ -3006,8 +3190,11 @@ def render_monitor_brief(project, task, dossier_id, brief, rerun=False):
             lines.append("  来源：%s；锚点：%s；理由：%s" %
                          (item.get("source"), ", ".join(item.get("anchors") or []), item.get("reason")))
         return "\n".join(lines) + "\n"
-    lines = [f"# 监督简报 · {dossier_id}", "", f"任务：`{task}`", f"建议结论：**{brief['recommendation']}**", "",
-             "## 摘要", brief["summary"], "", "## 偏离"]
+    role_label = "Advisor" if auditor_role == "advisor" else "Monitor"
+    header_meta = [f"任务：`{task}`", f"建议结论：**{brief['recommendation']}**"]
+    if auditor_model:
+        header_meta.append(f"审计角色：{role_label}（`{auditor_model}`）" + (f" · {route_reason}" if route_reason else ""))
+    lines = [f"# 监督简报 · {dossier_id}", ""] + header_meta + ["", "## 摘要", brief["summary"], "", "## 偏离"]
     findings = brief.get("findings") or []
     if not findings:
         lines.append("无")
@@ -3695,6 +3882,9 @@ def cmd_decide(project, args):
     record = {"type": "decision", "task": args.task, "decision_id": args.decision_id,
               "request_path": frozen, "request_sha256": request_hash,
               "decision": decision_text, "full": decision_text, "rendered": rendered}
+    advice_ref = getattr(args, "advice", None)
+    if advice_ref:
+        record["advice_id"] = str(advice_ref)
     if prior and getattr(args, "rerule", False):
         record["rerule"] = True
         record["replaced_seq"] = prior.get("seq")
@@ -3799,10 +3989,17 @@ def append_ledger(project, record):
     return record
 
 
-def append_brief_ledger(project, task, dossier_id, dossier_hash, brief_text, rerun=False, brief_json=None):
+def append_brief_ledger(project, task, dossier_id, dossier_hash, brief_text, rerun=False, brief_json=None,
+                        auditor="monitor", auditor_model="", route_reason=""):
     record = {"type": "brief", "task": task, "dossier": dossier_id,
               "dossier_hash": dossier_hash, "brief_sha256": hashlib.sha256(brief_text.encode()).hexdigest(),
               "brief": brief_text}
+    if auditor:
+        record["auditor"] = auditor
+    if auditor_model:
+        record["auditor_model"] = auditor_model
+    if route_reason:
+        record["route_reason"] = route_reason
     if isinstance(brief_json, dict):
         record["brief_json"] = json.loads(json.dumps(brief_json, ensure_ascii=False))
     if rerun:
@@ -4031,6 +4228,117 @@ def task_has_v1_refs(st):
     return bool(st.get("base_ref") or any(lg.get("start_ref") or lg.get("end_ref") for lg in st.get("legs", [])))
 
 
+V2_COMPAT_DEFAULTS = {
+    "version": 2,
+    "conductor": {
+        "backend": "codex",
+        "model": "gpt-6-astra",
+        "reasoning_effort": "ultra",
+        "council_for_major_decisions": True,
+        "service_tier": "priority",
+        "disable_fast_mode": False,
+    },
+    "advisor": {"enabled": False},
+    "monitor": {
+        "enabled": True,
+        "backend": "codex",
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "max",
+        "final_reasoning_effort": "max",
+        "timeout_minutes": 40,
+        "midleg_llm_checks": True,
+        "midleg_llm_on_alert": True,
+    },
+    "executor": {
+        "backend": "codex",
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "ultra",
+        "escalation": {
+            "enabled": True,
+            "model": "gpt-6.1-sol",
+            "reasoning_effort": "ultra",
+            "after_revise": 2,
+            "after_blocked_or_failed_legs": 2,
+            "max_per_task": 3,
+        },
+    },
+    "memory": {"curation_model": "sonnet"},
+}
+
+
+def _is_v3_layer(layer):
+    if not isinstance(layer, dict):
+        return False
+    if layer.get("version") == 3 or "advisor" in layer:
+        return True
+    cond = layer.get("conductor") if isinstance(layer.get("conductor"), dict) else {}
+    mon = layer.get("monitor") if isinstance(layer.get("monitor"), dict) else {}
+    ex = layer.get("executor") if isinstance(layer.get("executor"), dict) else {}
+    if str(cond.get("backend") or "").lower() == "agy" or str(cond.get("model") or "").startswith("gemini-"):
+        return True
+    if str(mon.get("backend") or "").lower() == "agy" or str(mon.get("model") or "").startswith("gemini-"):
+        return True
+    if str(ex.get("backend") or "").lower() == "claude":
+        return True
+    return False
+
+
+def _uses_v2_compat_defaults(layers):
+    """Existing v1/v2 project configs without v3 markers keep v2 defaults cleanly."""
+    meaningful = [
+        {k: v for k, v in layer.items() if k != "_comment"}
+        for layer in layers if isinstance(layer, dict)
+    ]
+    if not any(meaningful):
+        return False
+    if any(_is_v3_layer(layer) for layer in meaningful):
+        return False
+    return True
+
+
+def _apply_v2_compat_defaults(base):
+    """Map v3 skill defaults back to v2 defaults for legacy v1/v2 projects without clobbering custom skill overrides."""
+    out = json.loads(json.dumps(base))
+    out["version"] = 2
+    cond = out.get("conductor") or {}
+    if str(cond.get("model") or "").startswith("gemini-"):
+        cond["model"] = "gpt-6-astra"
+        cond["reasoning_effort"] = "ultra"
+        cond["council_for_major_decisions"] = True
+    cond.pop("backend", None)
+    out["conductor"] = cond
+    out["advisor"] = {"enabled": False}
+    mon = out.get("monitor") or {}
+    if str(mon.get("backend") or "").lower() == "agy" or str(mon.get("model") or "").startswith("gemini-"):
+        mon.pop("backend", None)
+        mon["model"] = "gpt-5.6-luna"
+        mon["reasoning_effort"] = "max"
+        mon["final_reasoning_effort"] = "max"
+        mon["timeout_minutes"] = 40
+        mon["midleg_llm_checks"] = True
+        mon["midleg_llm_on_alert"] = True
+    out["monitor"] = mon
+    ex = out.get("executor") or {}
+    if str(ex.get("backend") or "").lower() == "claude":
+        ex["backend"] = "codex"
+        ex["model"] = "gpt-6.1-sol"
+        ex["reasoning_effort"] = "ultra"
+        ex["escalation"] = {
+            "enabled": True,
+            "model": "gpt-6.1-sol",
+            "reasoning_effort": "ultra",
+            "after_revise": 2,
+            "after_blocked_or_failed_legs": 2,
+            "max_per_task": 3,
+        }
+    out["executor"] = ex
+    mem = out.get("memory") or {}
+    if str(mem.get("curation_model") or "").startswith("gemini-"):
+        mem["curation_model"] = "sonnet"
+    out["memory"] = mem
+    return out
+
+
 class Project:
     def __init__(self, root):
         self.root = canonical_dir(root)
@@ -4129,6 +4437,8 @@ class Project:
         project_cfg = {k: v for k, v in project_cfg.items() if k != "quota"}
         baton_cfg = {k: v for k, v in baton_cfg.items() if k != "quota"}
         layers = (project_cfg, baton_cfg)
+        if _uses_v2_compat_defaults(layers):
+            base = _apply_v2_compat_defaults(base)
         mode = base.get("mode", "standard")
         for layer in layers:
             if "mode" in layer:
@@ -4602,6 +4912,8 @@ def leg_terminal_calls(project, task, leg, since=None):
             backend = "codex"
     if backend == "hermes":
         return hermes_terminal_calls(project, task, leg, since=since)
+    if backend == "claude":
+        return v3_research.claude_terminal_calls(leg.get("events", ""))
     events, _ = read_events(leg.get("events", ""))
     calls = []
     for index, event in enumerate(events):
@@ -6523,17 +6835,31 @@ def _adopt_freeze_entries(project, task, manifest, paths):
 
 
 PRESET_KEYS = {
-    "executor": ("backend", "provider", "model", "reasoning_effort", "service_tier", "disable_fast_mode", "escalation"),
-    "monitor": ("backend", "provider", "base_url", "model", "reasoning_effort", "final_reasoning_effort", "service_tier"),
+    "conductor": ("backend", "model", "reasoning_effort", "council_for_major_decisions"),
+    "advisor": ("enabled", "backend", "model", "reasoning_effort", "timeout_minutes",
+                "design_gate", "escalate_on_revise_streak", "handle_final_audit", "handle_violation_audit"),
+    "executor": ("backend", "provider", "model", "reasoning_effort", "service_tier", "disable_fast_mode",
+                 "permission_mode", "safe_mode", "disallowed_tools", "escalation"),
+    "monitor": ("enabled", "backend", "provider", "base_url", "model", "reasoning_effort",
+                "final_reasoning_effort", "service_tier", "midleg_llm_checks", "midleg_llm_on_alert"),
 }
 
 
 def _preset_summary(preset):
     ex, mon = preset.get("executor") or {}, preset.get("monitor") or {}
-    tier = "·fast" if ex.get("service_tier") == "priority" else ""
+    adv = preset.get("advisor") or {}
+    ex_backend = ex.get("backend") or "codex"
+    tier = "·fast" if ex_backend == "codex" and ex.get("service_tier") == "priority" else ""
+    ex_head = (f"claude/{ex.get('model')}·{ex.get('reasoning_effort')}" if ex_backend == "claude"
+               else f"{ex.get('provider', 'openai-codex')}/{ex.get('model')}·{ex.get('reasoning_effort')}{tier}")
     mon_via = mon.get("backend") or "codex"
-    return (f"执行者 {ex.get('provider', 'openai-codex')}/{ex.get('model')}·{ex.get('reasoning_effort')}{tier}；"
-            f"monitor {mon_via}/{mon.get('provider') or 'openai'}/{mon.get('model')}·{mon.get('reasoning_effort')}")
+    mon_head = (f"{mon_via}/{mon.get('model')}·{mon.get('reasoning_effort')}"
+                if mon_via in ("agy", "claude")
+                else f"{mon_via}/{mon.get('provider') or 'openai'}/{mon.get('model')}·{mon.get('reasoning_effort')}")
+    parts = [f"执行者 {ex_head}", f"monitor {mon_head}"]
+    if adv.get("enabled") and adv.get("model"):
+        parts.append(f"advisor {adv.get('backend', 'agy')}/{adv.get('model')}")
+    return "；".join(parts)
 
 
 def _preset_active(cfg, preset):
@@ -6581,6 +6907,8 @@ def cmd_preset(project, args):
         started.append(task)
     new = json.loads(json.dumps(data))
     for role, keys in PRESET_KEYS.items():
+        if role not in preset:
+            continue
         section = {k: v for k, v in (new.get(role) or {}).items() if k not in keys}
         section.update({k: v for k, v in (preset.get(role) or {}).items() if k in keys})
         new[role] = section
@@ -6601,8 +6929,8 @@ def cmd_preset(project, args):
                                      cfg, upgrade=True)
     print(f"已切换到预设 {args.name}：{_preset_summary(preset)}")
     for task in started:
-        assignments = [f"{role}.{key}={json.dumps(cfg[role].get(key), ensure_ascii=False)}"
-                       for role, keys in PRESET_KEYS.items() for key in keys]
+        assignments = [f"{role}.{key}={json.dumps((cfg.get(role) or {}).get(key), ensure_ascii=False)}"
+                       for role, keys in PRESET_KEYS.items() if role in preset for key in keys]
         cmd_amend(project, argparse.Namespace(task=task, amendment_file=None, config=assignments,
                                               adopt=[], user_approved=False))
         print(f"任务 {task} 的配置快照已同步到预设 {args.name}")
@@ -6721,6 +7049,169 @@ def protocol_text(project, task):
         "LANGUAGE": cfg.get("language", "中文"),
         "TEST_COMMAND": cfg["supervision"].get("test_command") or "（未配置，按简报中的验证方式）",
     })
+
+
+def claude_task_home(project, task):
+    return canonical_dir(os.path.join(project.state_dir, "tasks", str(task), "claude"))
+
+
+def prepare_task_claude_context(project, task, st=None, workspace_root=None, cfg=None):
+    """Prepare Claude Code executor system prompt & optional MCP config in task state dir.
+    Never modifies or dirties the project repository's CLAUDE.md.
+    """
+    st = st or {}
+    cfg = cfg or config_for_state(project, st)
+    home = st.get("claude_home") or claude_task_home(project, task)
+    os.makedirs(home, exist_ok=True)
+    parts = []
+    if harness_is_approved(project, task, st):
+        parts.append(read_text(harness_path(project, task)).strip())
+    charter_summary = hermes_ephemeral_system_prompt(project, task, st).strip()
+    if charter_summary:
+        parts.append(charter_summary)
+    prompt_body = "\n\n---\n\n".join(p for p in parts if p) + "\n"
+    prompt_hash = hashlib.sha256(prompt_body.encode("utf-8")).hexdigest()
+    sys_prompt_path = os.path.join(home, "system-prompt.md")
+    with open(sys_prompt_path, "w", encoding="utf-8") as stream:
+        stream.write(prompt_body)
+
+    mcp_path = None
+    if memory_installed(cfg):
+        mcp_path = os.path.join(home, "mcp-config.json")
+        mcp_cfg = {
+            "mcpServers": {
+                "baton-memory": {
+                    "command": memory_venv_python(cfg),
+                    "args": ["-m", "baton_memory.server"],
+                    "env": {
+                        "MEM0_TELEMETRY": "false",
+                        "BATON_HOME": memory_baton_home(cfg),
+                        "BATON_PROJECT_ROOT": str(project.root),
+                        "BATON_TASK": str(task),
+                    },
+                }
+            }
+        }
+        write_json(mcp_path, mcp_cfg)
+
+    def update(state):
+        state["claude_home"] = home
+        state["claude_system_prompt_path"] = sys_prompt_path
+        state["claude_last_harness_sha256"] = state.get("claude_harness_sha256")
+        state["claude_harness_sha256"] = prompt_hash
+        if mcp_path:
+            state["claude_mcp_config_path"] = mcp_path
+    project.update_state(task, update)
+    return sys_prompt_path, prompt_hash, mcp_path
+
+
+def _claude_should_reset_session(st, new_harness_sha256, cfg):
+    """Determine if Claude executor must start a fresh session instead of --resume."""
+    if not st or not st.get("thread_id"):
+        return True, "initial"
+    prev_hash = st.get("claude_session_harness_sha256")
+    if prev_hash and new_harness_sha256 and prev_hash != new_harness_sha256:
+        return True, "harness_or_charter_changed"
+    legs = st.get("legs") or []
+    if legs:
+        last_leg = legs[-1]
+        if last_leg.get("status") == "violation":
+            return True, "after_violation"
+        if st.get("rolled_back_since_leg"):
+            return True, "after_rollback"
+        if int((last_leg.get("claude_meta") or {}).get("compaction_events") or 0) >= 2:
+            return True, "compaction_burst"
+    max_legs = int((cfg.get("executor") or {}).get("max_legs_per_session", 4) or 4)
+    if int(st.get("claude_session_leg_count", 0) or 0) >= max_legs:
+        return True, f"max_legs_per_session({max_legs})"
+    return False, ""
+
+
+def _claude_handoff_prefix(project, task, st, reason):
+    """Compact handoff packet prepended when Claude executor resets to a fresh session."""
+    brief = read_text(os.path.join(project.task_dir(task), "brief.md")).strip()
+    precedents = _precedents_text(project, task).strip()
+    log_tail = read_text(project.p("log.md")).strip()[-3000:]
+    lines = [
+        f"[Baton v3 新会话交接包（重置原因：{reason}）]",
+        "以下是当前任务简报、有效判例和最近日志尾迹，请在此基础上继续执行本轮指令：",
+        "",
+        "## 任务简报",
+        brief[:6000] if brief else "（无）",
+    ]
+    if precedents:
+        lines += ["", "## 已有判例与指挥消息", precedents[:4000]]
+    if log_tail:
+        lines += ["", "## 最近修改日志尾迹", log_tail]
+    lines += ["", "---", ""]
+    return "\n".join(lines)
+
+
+def claude_command(project, kind, thread_id, cfg=None, task=None, leg_n=1,
+                   system_prompt_text="", session_id=None, reset_session=False,
+                   mcp_config_path=None):
+    """Build the Claude Code (`claude -p`) invocation for one executor leg."""
+    cfg = cfg or project.config
+    ex = cfg["executor"]
+    model = ex.get("model") or "opus"
+    effort = ex.get("reasoning_effort") or "xhigh"
+    perm_mode = ex.get("permission_mode") or "bypassPermissions"
+    disallowed = list(ex.get("disallowed_tools") or ["Bash(baton *)", "Bash(git push*)", "Bash(rm -rf /*)"])
+    schema = json.loads(read_text(os.path.join(TEMPLATES, "leg-result.schema.json")))
+    schema_text = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+
+    cmd = [
+        platform_support.executable("claude"),
+        "-p",
+        "--model", str(model),
+        "--effort", str(effort),
+    ]
+    if ex.get("safe_mode", True):
+        cmd += ["--safe-mode"]
+    cmd += [
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--strict-mcp-config",
+    ]
+    if mcp_config_path and os.path.isfile(mcp_config_path):
+        cmd += ["--mcp-config", mcp_config_path]
+    if kind == "resume" and thread_id and not reset_session:
+        cmd += ["--resume", str(thread_id), "--system-prompt-snapshot", "on"]
+    else:
+        sid = session_id or str(uuid.uuid4())
+        cmd += ["--session-id", sid, "-n", f"baton:{task or 'task'}:L{leg_n}",
+                "--system-prompt-snapshot", "on"]
+    if system_prompt_text:
+        cmd += ["--append-system-prompt", system_prompt_text]
+    cmd += [
+        "--permission-mode", str(perm_mode),
+        "--permission-prompts", "none",
+    ]
+    if disallowed:
+        cmd += ["--disallowedTools", *disallowed]
+    cmd += [
+        "--output-format", "stream-json",
+        "--verbose",
+        "--json-schema", schema_text,
+    ]
+    return cmd
+
+
+def claude_executor_env(project, task, leg_n, started_at, cfg, st=None):
+    """Environment for Claude Code executor subprocess (preserves OAuth login)."""
+    env = os.environ.copy()
+    st = st or {}
+    env["BATON_PROJECT_ROOT"] = str(project.root)
+    env["TERMINAL_CWD"] = str(canonical_dir(st.get("launch_root") or project.root))
+    env["BATON_HOME"] = memory_baton_home(cfg)
+    env["BATON_TASK"] = str(task)
+    env["BATON_LEG"] = str(leg_n)
+    env["BATON_LEG_STARTED"] = str(started_at)
+    env["MEM0_TELEMETRY"] = "false"
+    env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+    return env
 
 
 def codex_command(project, kind, thread_id, last_path, cfg=None, workspace_root=None, isolated=False):
@@ -7758,7 +8249,7 @@ def codex_task_home(project, task):
 
 def executor_isolation_enabled(st):
     """Only tasks that recorded a task-local home use isolated context files."""
-    return bool(isinstance(st, dict) and (st.get("codex_home") or st.get("hermes_home")))
+    return bool(isinstance(st, dict) and (st.get("codex_home") or st.get("hermes_home") or st.get("claude_home")))
 
 
 def _codex_home_source():
@@ -8701,7 +9192,7 @@ def cmd_init(project, args):
     # it is absent, the skill defaults and any existing .baton override form
     # the values used for the generated file below.
     require_supported_executor(project.config)
-    for d in ("tasks", "reports", "reviews", "decisions", "runs"):
+    for d in ("tasks", "reports", "reviews", "decisions", "runs", "advice"):
         os.makedirs(project.p(d), exist_ok=True)
     project = Project(project.root)  # the newly created directory now has its on-disk spelling
     os.makedirs(project.state_dir, exist_ok=True)
@@ -8712,41 +9203,90 @@ def cmd_init(project, args):
         })
     if not os.path.exists(project.baton_config_path):
         cfg = project.config
-        write_json(project.baton_config_path, {
+        ex_cfg = cfg["executor"]
+        mon_cfg = cfg["monitor"]
+        adv_cfg = cfg.get("advisor") or {}
+        init_payload = {
+            "version": cfg.get("version", 3),
             "conductor": {
+                "backend": cfg["conductor"].get("backend", "agy"),
                 "model": cfg["conductor"]["model"],
+                "reasoning_effort": cfg["conductor"].get("reasoning_effort", "high"),
                 "council_for_major_decisions": cfg["conductor"]["council_for_major_decisions"],
             },
+            "advisor": {
+                "enabled": adv_cfg.get("enabled", True),
+                "backend": adv_cfg.get("backend", "agy"),
+                "model": adv_cfg.get("model", "gemini-4-neon-xhigh"),
+                "reasoning_effort": adv_cfg.get("reasoning_effort", "xhigh"),
+                "timeout_minutes": adv_cfg.get("timeout_minutes", 20),
+                "design_gate": adv_cfg.get("design_gate", True),
+                "escalate_on_revise_streak": adv_cfg.get("escalate_on_revise_streak", 2),
+                "handle_final_audit": adv_cfg.get("handle_final_audit", True),
+                "handle_violation_audit": adv_cfg.get("handle_violation_audit", True),
+            },
             "monitor": {
-                "model": cfg["monitor"]["model"],
-                "reasoning_effort": cfg["monitor"].get("reasoning_effort"),
-                "final_reasoning_effort": cfg["monitor"].get("final_reasoning_effort"),
-                "timeout_minutes": cfg["monitor"].get("timeout_minutes"),
+                "enabled": mon_cfg.get("enabled", True),
+                "backend": monitor_backend(cfg),
+                "model": mon_cfg["model"],
+                "reasoning_effort": mon_cfg.get("reasoning_effort"),
+                "final_reasoning_effort": mon_cfg.get("final_reasoning_effort"),
+                "timeout_minutes": mon_cfg.get("timeout_minutes"),
+                "midleg_llm_checks": mon_cfg.get("midleg_llm_checks", False),
+                "midleg_llm_on_alert": mon_cfg.get("midleg_llm_on_alert", False),
             },
             "executor": {
-                "backend": cfg["executor"]["backend"],
-                "hermes_profile": cfg["executor"].get("hermes_profile", "baton-exec-v2"),
-                "provider": cfg["executor"].get("provider", "openai-codex"),
-                "toolsets": cfg["executor"].get("toolsets", ["file", "terminal", "todo"]),
-                "sandbox_exec": cfg["executor"].get("sandbox_exec", True),
-                "model": cfg["executor"]["model"],
-                "reasoning_effort": cfg["executor"]["reasoning_effort"],
-                "escalation": cfg["executor"].get("escalation", {"enabled": False}),
-                "service_tier": cfg["executor"]["service_tier"],
-                "disable_fast_mode": cfg["executor"].get("disable_fast_mode", True),
-                "network_access": cfg["executor"].get("network_access", False),
+                "backend": ex_cfg["backend"],
+                "model": ex_cfg["model"],
+                "reasoning_effort": ex_cfg["reasoning_effort"],
+                "permission_mode": ex_cfg.get("permission_mode", "bypassPermissions"),
+                "safe_mode": ex_cfg.get("safe_mode", True),
+                "disallowed_tools": ex_cfg.get("disallowed_tools", ["Bash(baton *)", "Bash(git push*)", "Bash(rm -rf /*)"]),
+                "hermes_profile": ex_cfg.get("hermes_profile", "baton-exec-v2"),
+                "provider": ex_cfg.get("provider", "openai-codex"),
+                "toolsets": ex_cfg.get("toolsets", ["file", "terminal", "todo"]),
+                "sandbox_exec": ex_cfg.get("sandbox_exec", True),
+                "escalation": ex_cfg.get("escalation", {"enabled": False}),
+                "service_tier": ex_cfg.get("service_tier"),
+                "disable_fast_mode": ex_cfg.get("disable_fast_mode", True),
+                "network_access": ex_cfg.get("network_access", False),
             },
             "memory": {
                 "backend": cfg.get("memory", {}).get("backend", "mem0"),
                 "embedder": cfg.get("memory", {}).get("embedder", {}),
                 "inject_top_k": cfg.get("memory", {}).get("inject_top_k", 10),
                 "core_max_chars": cfg.get("memory", {}).get("core_max_chars", 2200),
-                "curation_model": cfg.get("memory", {}).get("curation_model", "sonnet"),
+                "curation_model": cfg.get("memory", {}).get("curation_model", "gemini-4-hydrogen-high"),
             },
             "supervision": {
                 "test_command": cfg["supervision"].get("test_command", ""),
             },
-        })
+            "presets": {
+                "research": {
+                    "description": "v3 默认研究模式：Agy Carbon(High) 总控 + Neon(XHigh) Advisor + Hydrogen(XHigh) Monitor + Claude Opus(XHigh) Coding",
+                    "conductor": {"backend": "agy", "model": "gemini-4-carbon-high", "reasoning_effort": "high", "council_for_major_decisions": False},
+                    "advisor": {"enabled": True, "backend": "agy", "model": "gemini-4-neon-xhigh", "reasoning_effort": "xhigh", "design_gate": True, "escalate_on_revise_streak": 2, "handle_final_audit": True, "handle_violation_audit": True},
+                    "monitor": {"enabled": True, "backend": "agy", "model": "gemini-4-hydrogen-xhigh", "reasoning_effort": "xhigh", "final_reasoning_effort": "xhigh", "midleg_llm_checks": False, "midleg_llm_on_alert": False},
+                    "executor": {"backend": "claude", "model": "opus", "reasoning_effort": "xhigh", "permission_mode": "bypassPermissions", "safe_mode": True},
+                },
+                "research-conserve": {
+                    "description": "agy 5h 额度吃紧时的降努力度保隔离模式：Monitor 降 Hydrogen(High)，Advisor 降 Neon(High)",
+                    "conductor": {"backend": "agy", "model": "gemini-4-carbon-high", "reasoning_effort": "high", "council_for_major_decisions": False},
+                    "advisor": {"enabled": True, "backend": "agy", "model": "gemini-4-neon-high", "reasoning_effort": "high", "design_gate": True, "escalate_on_revise_streak": 2, "handle_final_audit": True, "handle_violation_audit": True},
+                    "monitor": {"enabled": True, "backend": "agy", "model": "gemini-4-hydrogen-high", "reasoning_effort": "high", "final_reasoning_effort": "high", "midleg_llm_checks": False, "midleg_llm_on_alert": False},
+                    "executor": {"backend": "claude", "model": "opus", "reasoning_effort": "xhigh", "permission_mode": "bypassPermissions", "safe_mode": True},
+                },
+                "v2-codex": {
+                    "description": "兼容 v2 的纯 Codex 编排预设",
+                    "conductor": {"backend": "codex", "model": "gpt-6-astra", "reasoning_effort": "ultra", "council_for_major_decisions": True},
+                    "advisor": {"enabled": False},
+                    "monitor": {"enabled": True, "backend": "codex", "model": "gpt-5.6-luna", "reasoning_effort": "max", "final_reasoning_effort": "max", "midleg_llm_checks": True},
+                    "executor": {"backend": "codex", "provider": "openai-codex", "model": "gpt-6.1-sol", "reasoning_effort": "ultra", "service_tier": "priority", "disable_fast_mode": False},
+                },
+            },
+            "preset": "research",
+        }
+        write_json(project.baton_config_path, init_payload)
     cfg = project.config
     if cfg["executor"].get("backend") == "hermes":
         prepare_hermes_profile(project, cfg, upgrade_profile=bool(getattr(args, "upgrade_profile", False)))
@@ -8901,7 +9441,56 @@ def print_snapshot_scope(project, max_depth=4):
           "请和用户确认范围；要调整就编辑这个文件，下次快照起生效。")
 
 
+def agy_statusline_script_path():
+    return os.path.join(HERE, "agy_statusline.py")
+
+
+def agy_statusline_install():
+    """Sync agy_statusline.py to ~/.local/share/agy-statusline/statusline.py and print/apply config."""
+    src = agy_statusline_script_path()
+    dst_dir = os.path.expanduser("~/.local/share/agy-statusline")
+    dst = os.path.join(dst_dir, "statusline.py")
+    os.makedirs(dst_dir, exist_ok=True)
+    shutil.copy2(src, dst)
+    os.chmod(dst, 0o755)
+    cmd_str = f"python3 {dst}"
+    settings_path = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
+    updated = False
+    err_msg = ""
+    try:
+        data = read_json(settings_path, {}) or {}
+        if isinstance(data, dict):
+            data["statusLine"] = {
+                "type": "command",
+                "command": cmd_str,
+                "enabled": True,
+                "padding": 0,
+                "stack_with_default": False,
+            }
+            write_json_keep(settings_path, data)
+            updated = True
+    except OSError as exc:
+        err_msg = str(exc)
+    lines = [f"agy statusline 脚本已同步：{dst}"]
+    if updated:
+        lines.append(f"已写入 {settings_path}（重启 agy 或输入 /statusline on 立即生效）")
+    else:
+        if err_msg:
+            lines.append(f"未能自动写入 {settings_path}（{err_msg}）")
+        lines.append(f"请在 agy TUI 内直接输入：\n  /statusline {cmd_str}")
+    return "\n".join(lines)
+
+
 def cmd_statusline(project, args):
+    if getattr(args, "agy", False):
+        if args.action == "install":
+            print(agy_statusline_install())
+        else:
+            settings_path = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
+            data = read_json(settings_path, {}) or {}
+            sl = data.get("statusLine") if isinstance(data, dict) else None
+            print(f"agy statusline（{settings_path}）：{json.dumps(sl, ensure_ascii=False) if sl else '未配置'}")
+        return
     if args.action == "install":
         print(statusline_install(project, force=args.force))
     elif args.action == "uninstall":
@@ -8983,7 +9572,23 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
         effective_cfg = _effective_executor_config(cfg, escalation)
         context_isolation = harness_ready and (st.get("harness_required") or executor_isolation_enabled(st)) and (
             not st.get("legs") or executor_isolation_enabled(st))
-        if context_isolation:
+        claude_sys_prompt_path = None
+        claude_harness_hash = None
+        claude_mcp_path = None
+        claude_reset_session = False
+        claude_reset_reason = ""
+        claude_session_id = None
+        if cfg["executor"].get("backend") == "claude":
+            claude_sys_prompt_path, claude_harness_hash, claude_mcp_path = prepare_task_claude_context(
+                project, task, st, workspace_root=workspace_root, cfg=effective_cfg
+            )
+            st = project.read_state(task, {}) or st
+            claude_reset_session, claude_reset_reason = _claude_should_reset_session(st, claude_harness_hash, effective_cfg)
+            if kind == "start" or claude_reset_session:
+                claude_session_id = str(uuid.uuid4())
+            else:
+                claude_session_id = st.get("thread_id") or str(uuid.uuid4())
+        elif context_isolation:
             if cfg["executor"].get("backend") == "hermes":
                 home = st.get("hermes_home") or hermes_task_home(project, task, effective_cfg)
                 project.update_state(task, lambda s: s.update(hermes_home=home))
@@ -9034,21 +9639,31 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
         original_prompt = prompt
         prompt, memory_meta = memory_prompt_for_leg(project, task, prompt, st=st, cfg=cfg)
         if memory_meta.get("context"):
-            if cfg["executor"].get("backend") == "codex" and memory_meta.get("core"):
+            if cfg["executor"].get("backend") in ("codex", "claude") and memory_meta.get("core"):
                 prompt = (memory_meta["core"] + "\n\n" + original_prompt.rstrip() +
                           "\n\n" + memory_meta["context"])
             elif cfg["executor"].get("backend") == "hermes":
                 prompt = original_prompt.rstrip() + "\n\n" + memory_meta["context"]
+        if cfg["executor"].get("backend") == "claude" and kind == "resume" and claude_reset_session:
+            prompt = _claude_handoff_prefix(project, task, st, claude_reset_reason) + prompt
         with open(prompt_path, "w", encoding="utf-8") as f:
             f.write(prompt)
 
-        print(codex_quota.describe(safe_quota(block=True, notify=True)))
+        if cfg["executor"].get("backend") != "claude":
+            print(codex_quota.describe(safe_quota(block=True, notify=True)))
 
         start_ref, err = try_checkpoint(project, task, f"leg-{n:03d}-start", st=st)
         if err:
             print(f"注意：本轮起点回滚点没建成：{err}")
         last_path = project.leg_path(task, n, "last.json")
-        if cfg["executor"].get("backend") == "hermes":
+        if cfg["executor"].get("backend") == "claude":
+            sys_prompt_text = read_text(claude_sys_prompt_path) if claude_sys_prompt_path else ""
+            cmd = claude_command(
+                project, kind, st.get("thread_id"), cfg=effective_cfg, task=task, leg_n=n,
+                system_prompt_text=sys_prompt_text, session_id=claude_session_id,
+                reset_session=claude_reset_session, mcp_config_path=claude_mcp_path,
+            )
+        elif cfg["executor"].get("backend") == "hermes":
             try:
                 cmd = hermes_command(project, kind, st.get("thread_id"), prompt, cfg=effective_cfg,
                                      task=task if st.get("hermes_home") else None,
@@ -9111,6 +9726,14 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
             s.pop("pending_drift", None)
             s.pop("supervision_action", None)
             s["supervision_fallback"] = False
+            if cfg["executor"].get("backend") == "claude":
+                if claude_reset_session or kind == "start":
+                    s["thread_id"] = claude_session_id
+                    s["claude_session_leg_count"] = 1
+                    s["claude_session_harness_sha256"] = claude_harness_hash
+                    s.pop("rolled_back_since_leg", None)
+                else:
+                    s["claude_session_leg_count"] = int(s.get("claude_session_leg_count", 0) or 0) + 1
             if escalation.get("auto"):
                 s["escalation"] = dict(s.get("escalation") or {},
                                         auto_count=escalation.get("auto_count", 0),
@@ -9521,7 +10144,9 @@ def cmd_run(project, args):
         def run_attempt(attempt_cmd, attempt_prompt):
             """Run one executor invocation and return only data belonging to it."""
             nonlocal proc, reason, violation, st, last_freeze_check, last_rule_check
-            is_hermes = cfg["executor"].get("backend") == "hermes"
+            exec_backend = cfg["executor"].get("backend", "codex")
+            is_hermes = exec_backend == "hermes"
+            is_claude = exec_backend == "claude"
             if is_hermes:
                 hermes_preflight(project, cfg)
             try:
@@ -9536,6 +10161,11 @@ def cmd_run(project, args):
                     proc = platform_support.detached_popen(attempt_cmd, cwd=workspace_root, stdin=subprocess.DEVNULL,
                                             stdout=fout, stderr=ferr,
                                             env=hermes_executor_env(project, task, n, leg["started_at"], cfg, st))
+                elif is_claude:
+                    with open(attempt_prompt, "rb") as fin:
+                        proc = platform_support.detached_popen(attempt_cmd, cwd=workspace_root, stdin=fin, stdout=fout,
+                                                stderr=ferr,
+                                                env=claude_executor_env(project, task, n, leg["started_at"], cfg, st))
                 else:
                     with open(attempt_prompt, "rb") as fin:
                         proc = platform_support.detached_popen(attempt_cmd, cwd=workspace_root, stdin=fin, stdout=fout,
@@ -9546,7 +10176,8 @@ def cmd_run(project, args):
                 if proc.poll() is not None:
                     break  # finished on its own during the sleep: its result wins over a late stop
                 if not st.get("thread_id"):
-                    tid = thread_id_from(leg["events"])
+                    tid = (v3_research.parse_claude_stream(leg["events"], event_offset).get("session_id")
+                           if is_claude else thread_id_from(leg["events"]))
                     if tid:
                         st = project.update_state(task, lambda s: s.update(thread_id=tid))
                 current_state = project.read_state(task, {}) or st
@@ -9624,6 +10255,42 @@ def cmd_run(project, args):
                 if parsed is not None:
                     write_json(leg["last"], parsed)
                 current_result = parsed
+            elif is_claude:
+                cparsed = v3_research.parse_claude_stream(leg["events"], event_offset)
+                if cparsed.get("session_id"):
+                    st = project.update_state(task, lambda s: s.update(thread_id=cparsed["session_id"]))
+                # Record Claude telemetry & L1 stream alerts on the leg
+                cmeta = {
+                    "model": cparsed.get("model"),
+                    "total_cost_usd": cparsed.get("total_cost_usd"),
+                    "num_turns": cparsed.get("num_turns"),
+                    "usage": cparsed.get("usage") or {},
+                    "permission_denials": cparsed.get("permission_denials") or [],
+                    "compaction_events": cparsed.get("compaction_events") or 0,
+                    "rate_limits": cparsed.get("rate_limits"),
+                }
+                l1_alerts = v3_research.claude_l1_stream_alerts(
+                    cparsed, repeat_fail=int(((cfg.get("supervision") or {}).get("alerts") or {}).get("repeat_fail", 3) or 3)
+                )
+                def _save_claude_meta(s):
+                    lg = current_leg(s)
+                    if lg and lg.get("n") == n:
+                        lg["claude_meta"] = cmeta
+                        for item in l1_alerts:
+                            if item["key"] not in (lg.get("alert_keys") or []):
+                                lg.setdefault("alert_keys", []).append(item["key"])
+                                lg.setdefault("alerts", []).append(item)
+                project.update_state(task, _save_claude_meta)
+                parsed_out = normalize_executor_result(cparsed.get("structured_output"))
+                if parsed_out is None and reason:
+                    # Interrupted before Claude emitted structured result: synthesize fallback so dossier sealing never breaks
+                    log_tail = read_text(project.p("log.md"))[-1000:]
+                    parsed_out = v3_research.synthesize_interrupted_claude_result(reason, cparsed, log_tail=log_tail)
+                if parsed_out is not None:
+                    write_json(leg["last"], parsed_out)
+                current_result = parsed_out
+                if cparsed.get("is_error") and not result_error:
+                    result_error = cparsed.get("result_text") or "Claude executor 返回错误"
             else:
                 current_result = normalize_executor_result(read_json(leg["last"]))
             if current_result is not None and not isinstance(current_result, dict):
@@ -9637,9 +10304,14 @@ def cmd_run(project, args):
             failure_kind = (None if reason or not failed_call else
                             capacity_failure_kind(leg["events"], leg["stderr"], event_offset,
                                                   stderr_offset, rc_value, current_result))
-            has_output = bool(hermes_stdout.strip()) if is_hermes else any(ev.get("type") == "item.completed"
-                             and isinstance(ev.get("item"), dict)
-                             and ev["item"].get("type") != "error" for ev in new_events)
+            if is_claude:
+                has_output = bool(v3_research.parse_claude_stream(leg["events"], event_offset).get("has_output"))
+            elif is_hermes:
+                has_output = bool(hermes_stdout.strip())
+            else:
+                has_output = any(ev.get("type") == "item.completed"
+                                 and isinstance(ev.get("item"), dict)
+                                 and ev["item"].get("type") != "error" for ev in new_events)
             return rc_value, current_result, failure_kind, has_output, result_error
 
         attempt = 0
@@ -9654,7 +10326,15 @@ def cmd_run(project, args):
                 retry_prompt = project.leg_path(task, n, f"retry-{attempt:03d}.prompt.md")
                 with open(retry_prompt, "w", encoding="utf-8") as stream:
                     stream.write("上一次调用因模型容量不足中断，请从中断处继续当前任务，遵守 Baton 执行协议，本轮结束按 JSON schema 输出。")
-                if cfg["executor"].get("backend") == "hermes":
+                if cfg["executor"].get("backend") == "claude":
+                    sys_prompt_path = (current_state or {}).get("claude_system_prompt_path")
+                    sys_prompt_text = read_text(sys_prompt_path) if sys_prompt_path and os.path.isfile(sys_prompt_path) else ""
+                    attempt_cmd = claude_command(
+                        project, "resume", thread_id, cfg=cfg, task=task, leg_n=n,
+                        system_prompt_text=sys_prompt_text,
+                        mcp_config_path=(current_state or {}).get("claude_mcp_config_path"),
+                    )
+                elif cfg["executor"].get("backend") == "hermes":
                     retry_text = read_text(retry_prompt)
                     attempt_cmd = hermes_command(project, "resume", thread_id, retry_text, cfg=cfg,
                                                  task=task if st.get("hermes_home") else None,
@@ -9800,6 +10480,10 @@ def cmd_run(project, args):
         usage_state = project.read_state(task, {}) or st
         usage_leg = dict(leg, backend="hermes", thread_id=usage_state.get("thread_id"))
         dg["usage"] = hermes_usage(project, task, usage_leg)
+    elif monitor_cfg["executor"].get("backend") == "claude":
+        cparsed_end = v3_research.parse_claude_stream(leg["events"])
+        if cparsed_end.get("usage"):
+            dg["usage"] = cparsed_end["usage"]
     dossier_id = None
     if monitor_enabled(monitor_cfg) and status in ("report", "done", "violation"):
         # The dossier is assembled from the immutable end checkpoint after the executor leg
@@ -9857,7 +10541,8 @@ def cmd_run(project, args):
         os.remove(stop_flag)
     except OSError:
         pass
-    safe_quota(block=True, notify=True)
+    if monitor_cfg["executor"].get("backend") != "claude":
+        safe_quota(block=True, notify=True)
 
 
 def report_baseline(st, leg):
@@ -10123,6 +10808,296 @@ def cmd_wait(project, args):
                 reap_detached_runners()
                 return
         time.sleep(10)
+
+
+def _next_advice_id(project):
+    advice_dir = project.p("advice")
+    max_n = 0
+    if os.path.isdir(advice_dir):
+        for name in os.listdir(advice_dir):
+            m = re.match(r"^A(\d+)\.(?:json|md)$", name)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+    return f"A{max_n + 1:03d}"
+
+
+def _run_advisor_call(project, task, advice_id, mode, cfg, prompt, context_dir, schema_path):
+    """Run one stateless read-only Advisor invocation (agy default; claude/codex supported)."""
+    adv = cfg.get("advisor") or {}
+    backend = str(adv.get("backend") or "agy").strip().lower()
+    model = adv.get("model") or "gemini-4-neon-xhigh"
+    effort = adv.get("reasoning_effort") or "xhigh"
+    timeout_sec = max(30, int(float(adv.get("timeout_minutes", 20)) * 60))
+    out_dir = os.path.join(project.state_dir, "advice", advice_id)
+    os.makedirs(out_dir, exist_ok=True)
+    stdout_path = os.path.join(out_dir, "stdout.json")
+    stderr_path = os.path.join(out_dir, "stderr.log")
+    env = dict(os.environ)
+
+    if backend == "agy":
+        iso_settings = v3_research.write_isolated_agy_settings(os.path.join(out_dir, "isolated-agy.json"))
+        cmd = [
+            platform_support.executable("agy"),
+            "--model", str(model),
+            "--sandbox",
+            "--disable-slash-commands",
+            "--settings", iso_settings,
+            "--output-format", "json",
+            "--json-schema", schema_path,
+            "--print-timeout", f"{timeout_sec}s",
+            "-p", prompt,
+        ]
+        stdin_text = None
+    elif backend == "claude":
+        schema_text = json.dumps(json.loads(read_text(schema_path)), ensure_ascii=False, separators=(",", ":"))
+        env.update({"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                    "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
+        cmd = [
+            platform_support.executable("claude"),
+            "-p", "--safe-mode", "--strict-mcp-config", "--disable-slash-commands", "--no-chrome",
+            "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--tools", "Read,Grep,Glob", "--model", str(model), "--effort", str(effort),
+            "--no-session-persistence", "--output-format", "json", "--json-schema", schema_text,
+        ]
+        stdin_text = prompt
+    else:
+        out_json = os.path.join(out_dir, "result.json")
+        cmd = [
+            platform_support.executable("codex"), "exec", "--json", "--ignore-user-config",
+            "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+            "-C", context_dir, "-m", str(model), "-c", f'model_reasoning_effort="{effort}"',
+            "--output-schema", schema_path, "-o", out_json, "-",
+        ]
+        stdin_text = prompt
+
+    proc = platform_support.detached_popen(
+        cmd, cwd=context_dir,
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, encoding="utf-8",
+    )
+    project.update_state(task, lambda s: s.update(advisor_active={
+        "id": advice_id, "mode": mode, "model": model, "status": "running", "pid": proc.pid, "started_at": now()
+    }))
+    try:
+        stdout, stderr = proc.communicate(stdin_text, timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            platform_support.terminate_group(proc, force=True)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        proc.communicate()
+        project.update_state(task, lambda s: s.pop("advisor_active", None))
+        return None, {}, f"Advisor ({model}) 调用超时（{timeout_sec}s）"
+    finally:
+        project.update_state(task, lambda s: s.pop("advisor_active", None))
+
+    with open(stdout_path, "w", encoding="utf-8") as f:
+        f.write(stdout or "")
+    with open(stderr_path, "w", encoding="utf-8") as f:
+        f.write(stderr or "")
+    if proc.returncode != 0:
+        return None, {}, f"Advisor ({model}) 进程失败（exit {proc.returncode}）：{(stderr or stdout or '').strip()[-600:]}"
+
+    if backend == "agy":
+        return v3_research.parse_agy_json_output(stdout)
+    if backend == "claude":
+        try:
+            wrapper = json.loads(stdout or "")
+        except ValueError:
+            return None, {}, "Claude Advisor 输出不是 JSON"
+        if isinstance(wrapper, dict) and isinstance(wrapper.get("structured_output"), dict):
+            return wrapper["structured_output"], {"usage": wrapper.get("usage") or {}}, ""
+        return None, {}, "Claude Advisor 输出缺少 structured_output"
+    val = read_monitor_json(os.path.join(out_dir, "result.json"))
+    return (val, {}, "") if isinstance(val, dict) else (None, {}, "Codex Advisor 没有写出 JSON")
+
+
+def _pack_advisor_context(project, task, advice_id, mode, args, st):
+    """Deterministically pack authoritative files into a sealed read-only snapshot dir."""
+    ctx_dir = os.path.join(project.state_dir, "advice", advice_id, "context")
+    os.makedirs(ctx_dir, exist_ok=True)
+    packed = []
+
+    def copy_text(rel_name, text):
+        if not text:
+            return
+        dst = os.path.join(ctx_dir, rel_name)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(text)
+        packed.append(rel_name)
+
+    brief = read_text(os.path.join(project.task_dir(task), "brief.md"))
+    if brief:
+        copy_text("brief.md", brief)
+    harness = read_text(harness_path(project, task))
+    if harness:
+        copy_text("harness.md", harness)
+    prec = _precedents_text(project, task)
+    if prec:
+        copy_text("precedents.md", prec)
+
+    if mode == "decide":
+        did = getattr(args, "decision", None)
+        if not did:
+            die("baton advise decide 需要 --decision <D001>")
+        req_path = _decision_request(project, did)
+        if not req_path:
+            die(f"找不到决策请求 {did}-*.md")
+        copy_text(f"decision-{did}.md", read_text(req_path))
+        # Include latest dossier evidence if present
+        legs = st.get("legs") or []
+        for lg in reversed(legs):
+            did_prev = (lg.get("dossier") or {}).get("id")
+            if did_prev:
+                ev = read_text(os.path.join(dossier_path(project, did_prev), "evidence.md"))
+                if ev:
+                    copy_text("latest-evidence.md", ev)
+                    break
+    elif mode == "unblock":
+        legs = (st.get("legs") or [])[-2:]
+        log_tail = read_text(project.p("log.md"))[-4000:]
+        if log_tail:
+            copy_text("log-tail.md", log_tail)
+        for lg in legs:
+            ln = lg.get("n", 0)
+            did_prev = (lg.get("dossier") or {}).get("id")
+            if did_prev:
+                ev = read_text(os.path.join(dossier_path(project, did_prev), "evidence.md"))
+                if ev:
+                    copy_text(f"leg-{ln:03d}-evidence.md", ev)
+                dp = read_text(os.path.join(dossier_path(project, did_prev), "diff.patch"))
+                if dp:
+                    copy_text(f"leg-{ln:03d}-diff.patch", dp[:40000])
+            err_tail = lg.get("stderr_tail") or lg.get("error") or ""
+            if err_tail:
+                copy_text(f"leg-{ln:03d}-error.txt", str(err_tail))
+
+    for extra_path in getattr(args, "files", None) or []:
+        full = extra_path if os.path.isabs(extra_path) else os.path.join(project.root, extra_path)
+        if os.path.isfile(full):
+            rel = os.path.relpath(full, project.root).replace(os.sep, "/")
+            safe_rel = os.path.join("files", rel.lstrip("./").replace("..", "_"))
+            copy_text(safe_rel, read_text(full)[:40000])
+
+    # Seal context dir read-only
+    for root_dir, _dirs, files in os.walk(ctx_dir):
+        for fname in files:
+            try:
+                os.chmod(os.path.join(root_dir, fname), 0o444)
+            except OSError:
+                pass
+    return ctx_dir, packed
+
+
+def cmd_advise(project, args):
+    """First-class stateless Advisor command: baton advise {design,decide,audit,unblock} <task>."""
+    project.require_init()
+    check_task(args.task)
+    st = project.read_state(args.task, {}) or {}
+    cfg = config_for_state(project, st) if st.get("config_snapshot") else project.config
+    adv = cfg.get("advisor") or {}
+    if not adv.get("enabled", True):
+        die("当前配置中 advisor.enabled=false，不能运行 baton advise")
+    mode = args.advise_mode
+
+    if mode == "audit":
+        dossier_id = getattr(args, "dossier", None)
+        if not dossier_id:
+            leg = current_leg(st)
+            dossier_id = ((leg or {}).get("dossier") or {}).get("id")
+        if not dossier_id:
+            die("baton advise audit 需要 --dossier <卷宗编号>（或当前轮已有卷宗）")
+        dpath = dossier_path(project, dossier_id)
+        if not os.path.isdir(dpath):
+            die(f"找不到卷宗 {dossier_id}")
+        brief_path = project.p("reviews", dossier_id + "-brief.md")
+        if os.path.exists(brief_path) and not getattr(args, "rerun", False):
+            die(f"卷宗 {dossier_id} 已有监督简报；需要由 Advisor 重跑请加 --rerun")
+        leg = current_leg(st) or {}
+        leg_n = leg.get("n")
+        kind = dossier_manifest(project, dossier_id).get("type") or dossier_type_for(
+            leg.get("executor_status") or leg.get("status") or "report"
+        )
+        if getattr(args, "rerun", False) and leg:
+            project.update_state(args.task, lambda s: (current_leg(s).setdefault("monitor", {})).update(rerun=True))
+        ok = run_monitor_lifecycle(project, args.task, dossier_id, kind, cfg, leg_n,
+                                   leg.get("executor_status") or leg.get("status") or "report",
+                                   force_auditor="advisor")
+        if not ok:
+            st_after = project.read_state(args.task, {}) or {}
+            err = ((current_leg(st_after) or {}).get("monitor") or {}).get("error") or "Advisor 审计失败"
+            die(err)
+        print(f"Advisor 审计完成：{dossier_id}（模型：{adv.get('model')}）")
+        print(f"监督简报：{brief_path}")
+        print(f"下一步：逐条回应偏离并运行 baton rule {args.task} {dossier_id} <裁决文件>")
+        return
+
+    advice_id = _next_advice_id(project)
+    ctx_dir, packed = _pack_advisor_context(project, args.task, advice_id, mode, args, st)
+    schema_map = {
+        "design": os.path.join(TEMPLATES, "advisor-design.schema.json"),
+        "decide": os.path.join(TEMPLATES, "advisor-decide.schema.json"),
+        "unblock": os.path.join(TEMPLATES, "advisor-unblock.schema.json"),
+    }
+    schema_path = schema_map[mode]
+    question = (getattr(args, "question", None) or "").strip()
+    extra_lines = [
+        f"当前工作目录（只读上下文快照）包含以下由 Baton 确定性打包的文件：{', '.join(packed) or '（无）'}。",
+        "请逐一阅读上述文件，并给出结构化意见。",
+    ]
+    if question:
+        extra_lines.append(f"\nConductor 补充聚焦问题（仅供参考，以文件事实为准）：\n{question}")
+    if mode == "design":
+        extra_lines.append("\n重点检查：实验设计是否严谨、是否存在潜在数据泄露/评测口径漏洞、哪些文件必须冻结、止损条件是否明确。")
+    elif mode == "decide":
+        extra_lines.append("\n重点检查：对比决策请求中的所有方案及代价，给出明确推荐方案和可直接入账的判例草案。")
+    elif mode == "unblock":
+        extra_lines.append("\n重点检查：基于最近轮次的证据、diff 和错误日志，定位根因假设并设计最小诊断步骤，判断是否需要重置 Executor 会话。")
+
+    prompt = fill(read_text(os.path.join(TEMPLATES, "advisor-prompt.md")), {
+        "TASK": args.task,
+        "MODE": mode,
+        "EXTRA_INSTRUCTIONS": "\n".join(extra_lines),
+    })
+
+    value, meta, err = _run_advisor_call(project, args.task, advice_id, mode, cfg, prompt, ctx_dir, schema_path)
+    if value is None:
+        die(err or "Advisor 调用失败")
+    v_errors = v3_research.validate_advisor_output(mode, value)
+    if v_errors:
+        die("Advisor 输出未通过校验：" + "；".join(v_errors))
+
+    advice_dir = project.p("advice")
+    os.makedirs(advice_dir, exist_ok=True)
+    json_path = os.path.join(advice_dir, f"{advice_id}.json")
+    md_path = os.path.join(advice_dir, f"{advice_id}.md")
+    model = adv.get("model") or "gemini-4-neon-xhigh"
+    md_text = v3_research.render_advice_markdown(advice_id, mode, args.task, model, value, meta=meta, context_files=packed)
+    write_json(json_path, {"id": advice_id, "task": args.task, "mode": mode, "model": model,
+                           "context_files": packed, "meta": meta, "result": value})
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_text)
+    record = append_ledger(project, {
+        "type": "advice",
+        "task": args.task,
+        "advice_id": advice_id,
+        "mode": mode,
+        "model": model,
+        "context_files": packed,
+        "summary": str(value.get("summary") or "")[:600],
+        "advice_sha256": hashlib.sha256(md_text.encode("utf-8")).hexdigest(),
+        "path": md_path,
+    })
+    project.update_state(args.task, lambda s: s.setdefault("advices", []).append({
+        "id": advice_id, "mode": mode, "model": model, "at": now(),
+        "ledger_seq": record.get("seq"), "path": md_path,
+        "summary": str(value.get("summary") or "")[:300],
+    }))
+    print(f"BATON::ADVICE id={advice_id} mode={mode} model={model} ledger_seq={record.get('seq')}")
+    print(f"意见文件：{md_path}")
+    print(f"JSON 文件：{json_path}")
+    print("摘要：" + str(value.get("summary") or "").strip())
 
 
 def cmd_monitor(project, args):
@@ -11054,6 +12029,7 @@ def cmd_rollback(project, args):
     if staged:
         print("注意：暂存区里还有这些改动（回滚不碰暂存区）：" + "，".join(staged[:20])
               + "。如需丢弃，问过用户后运行 git restore --staged -- <路径>")
+    project.update_state(args.task, lambda s: s.update(rolled_back_since_leg=True))
     suspended = _suspend_memory_after_rollback(project, args.task, store, target, pre_ref)
     if suspended:
         print("已挂起来源快照晚于回滚目标的记忆：" + ", ".join(suspended))
@@ -11091,8 +12067,17 @@ def cmd_config(project, args):
     print(f"conductor.model：{conductor['model']}")
     print(f"conductor.council_for_major_decisions：{conductor['council_for_major_decisions']}")
     print(f"judge.council_for_major_decisions（v1 旧名，等同上一行）：{conductor['council_for_major_decisions']}")
-    for key in ("model", "reasoning_effort", "final_reasoning_effort", "timeout_minutes"):
-        print(f"monitor.{key}：{monitor.get(key)}")
+    adv = cfg.get("advisor") or {}
+    if adv:
+        print(f"advisor.enabled：{adv.get('enabled', False)}")
+        for key in ("backend", "model", "reasoning_effort", "timeout_minutes",
+                    "design_gate", "escalate_on_revise_streak", "handle_final_audit", "handle_violation_audit"):
+            if key in adv:
+                print(f"advisor.{key}：{adv.get(key)}")
+    for key in ("backend", "model", "reasoning_effort", "final_reasoning_effort", "timeout_minutes",
+                "midleg_llm_checks", "midleg_llm_on_alert"):
+        if key in monitor or key in ("model", "reasoning_effort", "final_reasoning_effort", "timeout_minutes"):
+            print(f"monitor.{key}：{monitor.get(key)}")
     if project.judge_renamed_to_monitor:
         print("迁移提示：项目层的 judge 节已按 v2 早期草案改名为 monitor。")
     for key in ("backend", "hermes_profile", "hermes_bin", "provider", "toolsets", "sandbox_exec", "model", "reasoning_effort", "service_tier", "disable_fast_mode", "network_access", "sandbox"):
@@ -11398,8 +12383,31 @@ def cmd_doctor(project, args):
         line("WARN", f"harness-base：存在但仍待审定（{base['path']}；源文件：{base['source_path']}）；请运行 baton harness base --approve")
     else:
         line("WARN", f"harness-base：不存在（{base['path']}；源文件：{base['source_path']}）；请运行 baton harness base --init")
+    uses_agy = (
+        str(cfg["conductor"].get("backend") or "").lower() == "agy"
+        or str(cfg["conductor"].get("model") or "").startswith("gemini-")
+        or monitor_backend(cfg) == "agy"
+        or ((cfg.get("advisor") or {}).get("enabled") and str((cfg.get("advisor") or {}).get("backend") or "agy").lower() == "agy")
+    )
+    uses_claude = (
+        ex.get("backend") == "claude"
+        or monitor_backend(cfg) == "claude"
+        or ((cfg.get("advisor") or {}).get("enabled") and str((cfg.get("advisor") or {}).get("backend") or "").lower() == "claude")
+    )
+    if uses_agy:
+        agy_bin = shutil.which("agy.exe" if os.name == "nt" else "agy")
+        line("OK" if agy_bin else "FAIL", f"agy CLI：{agy_bin or '未安装'}")
+        if agy_bin:
+            line("OK", "agy 版本：" + (run([platform_support.executable("agy"), "--version"], check=False).strip() or "未知"))
+    if uses_claude:
+        claude_bin = shutil.which("claude.exe" if os.name == "nt" else "claude")
+        line("OK" if claude_bin else "FAIL", f"claude CLI：{claude_bin or '未安装'}")
+        if claude_bin:
+            line("OK", "claude 版本：" + (run([platform_support.executable("claude"), "--version"], check=False).strip() or "未知"))
     if ex.get("backend") == "hermes":
         line("OK", f"codex CLI：Hermes backend 不需要直连 Codex CLI（provider={executor_provider(cfg)}）")
+    elif ex.get("backend") == "claude":
+        line("OK", f"Claude executor：model={ex['model']} effort={ex['reasoning_effort']} safe_mode={ex.get('safe_mode', True)}")
     else:
         codex = shutil.which("codex.exe" if os.name == "nt" else "codex")
         line("OK" if codex else "FAIL", f"codex CLI：{codex or '未安装'}")
@@ -11414,12 +12422,16 @@ def cmd_doctor(project, args):
             ok = not doctor_hermes(project, cfg, line) and ok
     ok = not doctor_memory(project, cfg, line) and ok
     baton_state = "存在" if os.path.exists(project.baton_config_path) else "缺失"
+    adv_cfg = cfg.get("advisor") or {}
+    adv_summary = f"；advisor 模型：{adv_cfg.get('model')}" if adv_cfg.get("enabled") else ""
     line("OK" if baton_state == "存在" else "WARN",
-         f"conductor 模型：{cfg['conductor']['model']}；monitor 模型：{cfg['monitor']['model']}；"
+         f"conductor 模型：{cfg['conductor']['model']}{adv_summary}；monitor 模型：{cfg['monitor']['model']}（{monitor_backend(cfg)}）；"
          f"baton.json：{baton_state}（{project.baton_config_path}）")
     if ex.get("backend") == "hermes":
         line("OK", f"Hermes executor：provider={executor_provider(cfg)} model={ex['model']} effort={ex['reasoning_effort']}")
         line("OK", "Hermes quota：跳过 Codex CLI quota probe，由 Hermes provider 管理")
+    elif ex.get("backend") == "claude":
+        line("OK", "Claude quota：跳过 Codex CLI quota probe，由 Claude/Agy statusline 与 stream-json 观测")
     else:
         cache = read_json(os.path.expanduser("~/.codex/models_cache.json"), {})
         models = cache.get("models", cache) if isinstance(cache, dict) else cache
@@ -11651,9 +12663,10 @@ def main():
     s.add_argument("--fresh", action="store_true", help="复制项目或原状态不存在时，开始新的项目外状态")
     s.add_argument("--upgrade-profile", action="store_true", help="明确覆盖已有 Hermes profile 的 SOUL.md/config.yaml，并打印前后差异")
     s.add_argument("--migrate", action="store_true", help="把项目根 baton.json 从 v1 迁移到 v2，并保留 .v1.bak")
-    s = sub.add_parser("statusline", help="项目 statusline 的 Codex 额度行")
+    s = sub.add_parser("statusline", help="项目或 agy statusline 配置与状态")
     s.add_argument("action", nargs="?", default="status", choices=["install", "uninstall", "status"])
     s.add_argument("--force", action="store_true", help="settings.local.json 被 git 跟踪或指向项目外时也安装")
+    s.add_argument("--agy", action="store_true", help="安装或检查 Antigravity CLI (agy) statusline")
     s = sub.add_parser("new", help="新建任务并生成简报模板")
     s.add_argument("task")
     s.add_argument("--brief", help="用已有文件作为简报")
@@ -11683,6 +12696,15 @@ def main():
     s = sub.add_parser("wait", help="阻塞到本轮结束、监管时间到或额度告警（请在后台运行）")
     s.add_argument("task")
     s.add_argument("--tick", type=float, help="监管间隔分钟数（默认取配置）")
+    s = sub.add_parser("advise", help="无状态调用高阶 Advisor（默认 Gemini 4 Neon XHigh）并入账")
+    s.add_argument("advise_mode", choices=list(v3_research.ADVISOR_MODES),
+                   help="design（开题/重设计）/ decide（关键决策）/ audit（卷宗冷眼审计）/ unblock（排障解阻）")
+    s.add_argument("task")
+    s.add_argument("--decision", help="decide 模式下指定决策请求编号（例如 D001）")
+    s.add_argument("--dossier", help="audit 模式下指定卷宗编号")
+    s.add_argument("--rerun", action="store_true", help="audit 模式下覆盖已有简报并重跑")
+    s.add_argument("--files", nargs="*", default=[], help="额外打包进只读上下文快照的项目文件")
+    s.add_argument("-q", "--question", default="", help="聚焦问题（可选，文件事实优先）")
     s = sub.add_parser("monitor", help="运行或重跑指定卷宗的监督 monitor")
     s.add_argument("task")
     s.add_argument("dossier", nargs="?")
@@ -11700,6 +12722,7 @@ def main():
     s.add_argument("task")
     s.add_argument("decision_id")
     s.add_argument("decision_file")
+    s.add_argument("--advice", help="关联的 Advisor 意见编号（例如 A001）")
     s.add_argument("--rerule", action="store_true")
     s = sub.add_parser("status", help="监管快照")
     s.add_argument("task")
@@ -11799,7 +12822,7 @@ def main():
     handler = {
         "init": cmd_init, "statusline": cmd_statusline, "new": cmd_new, "start": cmd_start,
         "harness": cmd_harness,
-        "resume": cmd_resume, "steer": cmd_steer, "wait": cmd_wait, "monitor": cmd_monitor, "status": cmd_status,
+        "resume": cmd_resume, "steer": cmd_steer, "wait": cmd_wait, "advise": cmd_advise, "monitor": cmd_monitor, "status": cmd_status,
         "close": cmd_close, "gc": cmd_gc,
         "supervised": cmd_supervised, "stop": cmd_stop, "checkpoint": cmd_checkpoint, "refs": cmd_refs,
         "diff": cmd_diff, "rollback": cmd_rollback, "list": cmd_list, "config": cmd_config, "quota": cmd_quota,

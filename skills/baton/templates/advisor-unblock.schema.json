@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "root_cause_hypotheses", "next_diagnostic_steps", "should_reset_session"],
+  "properties": {
+    "summary": {"type": "string"},
+    "root_cause_hypotheses": {"type": "array", "items": {"type": "string"}},
+    "next_diagnostic_steps": {"type": "array", "items": {"type": "string"}},
+    "should_reset_session": {"type": "boolean", "description": "Whether executor should start a fresh Claude session next leg"}
+  }
+}

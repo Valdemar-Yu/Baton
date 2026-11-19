@@ -1,115 +1,77 @@
 ---
 name: baton
 description: >-
-  对所有需要创建、修改、重构、调试、测试或审阅代码的任务，使用 Baton 的 conductor、monitor、executor 流程。默认 conductor 为 gpt-6-astra ultra，executor 为 gpt-6.1-sol ultra，二者开启 Codex Fast；monitor 使用 gpt-5.6-luna 的最高可用 effort（max）并只读证据。触发：任何 coding、code、编程、修复、实现、重构、测试任务，或 /baton、delegate to codex。
+  Baton v3（Agy 核心 + Claude 编码的 Research Baton）：对所有需要创建、修改、重构、调试、实验或审阅代码的任务，使用 Conductor（agy / Gemini 4 Carbon High）、Advisor（agy -p / Gemini 4 Neon XHigh）、Monitor（agy -p / Gemini 4 Hydrogen XHigh）和 Executor（Claude Code / Opus XHigh）的检审分离流程。触发：任何 coding、code、编程、修复、实现、重构、实验代码、测试任务，或 /baton、delegate to claude/codex。
 ---
 
-# Baton：conductor、monitor、executor
+# Baton v3：Agy 核心 + Claude 编码的 Research Baton
 
-你是 Codex 主会话的 **conductor**，也是唯一决策者。你定义任务边界、写简报、读取 monitor 的证据简报、用 `baton rule` 裁决并决定是否续跑。代码审阅由独立 monitor 完成；你不直接审原始代码、不亲手修改 executor 负责的代码。需要改动时写消息交给 executor，涉及用户选择的动作由用户在自己的终端执行。
+你是 **Antigravity CLI (`agy`) 主会话的 Conductor**（默认 `gemini-4-carbon-high`），也是唯一的执行决策者。你负责任务边界、起草简报与 harness、在关键节点调用无状态 **Advisor**（`baton advise`，默认 `gemini-4-neon-xhigh`）、读取单轨冷眼审计简报、用 `baton rule` 逐条裁决并决定是否续跑。你不直接修改 executor 负责的代码，也不能跳过冷眼简报自审自裁。
 
-三个角色各自只有一条职责线：
+## 四角色分工（零重叠）
 
 | 角色 | 默认运行位置 | 负责 |
 |---|---|---|
-| conductor | Codex 主会话，`gpt-6-astra` / `ultra` / Fast | 简报、范围和决策；处理事件、裁决、最终验收 |
-| executor | Codex CLI，`gpt-6.1-sol` / `ultra` / Fast | 按简报改代码、验证、记录 `.baton/log.md`、交小修改日志或大修改 HTML 汇报 |
-| monitor | Codex 独立只读进程，`gpt-5.6-luna` / `max` | 只读卷宗、快照、章程、判例和消息，写监督简报；不做决定、不与 executor 对话 |
+| **Conductor** | `agy` 主会话，`gemini-4-carbon-high` | 日常总控、起草简报与范围、决定何时调 `baton advise`、逐条 `baton rule` / `decide` / `close` |
+| **Advisor** | `agy -p` 无状态只读进程，`gemini-4-neon-xhigh` | 开题设计把关（`design`）、关键决策权衡（`decide`）、终审/违例/连续≥2次 REVISE 的**单轨冷眼审计**（`audit`）、卡壳诊断（`unblock`） |
+| **Monitor** | `agy -p` 隔离只读进程，`gemini-4-hydrogen-xhigh` | 常规 `REPORT` 卷宗的跨家族冷眼证据核对（偏离清单 `F1/F2...` + 记忆建议）；不改代码、不做设计拍板 |
+| **Executor** | `claude -p`（`--safe-mode`），`opus` / `xhigh` | 唯一代码写入者；按简报改代码、跑验证、追加 `.baton/log.md`、交大修改 `R*.html` 汇报并输出结构化 `leg-result` |
 
-记忆使用 mem0、本地 Ollama 的 `baton-qwen3-embed:latest` 和项目外台账；Ollama 不可用时检索退回关键词，并在证据中写明原因。
+> **单轨冷眼铁律**：每份封存卷宗只由**一位**冷眼角色审计——常规 `REPORT` 归 Hydrogen Monitor，终审（`DONE`）/ 违例（`VIOLATION`）/ 连续 ≥2 次 `REVISE` 自动直达 Neon Advisor（跳过 Monitor，既省 `agy` 配额又防锚定）。
+> **降努力度不降制度**：`agy` 5h 额度吃紧时，执行 `baton preset use research-conserve` 把 Monitor/Advisor 降到 `high`，绝不取消独立冷眼边界。
 
 ## 启动一项任务
 
-在项目目录运行，先确认主会话使用 `/model gpt-6-astra`、`/reasoning ultra`，并让 `service_tier="priority"` 保持 Codex Fast；不一致时提醒用户调整。不要再用 v1 的 `judge.model` 派子 agent 当裁判。
+在项目目录运行，先确认环境、配置与基底：
 
 ```bash
 baton doctor
 baton config
-baton init                    # 首次安装；默认使用 Codex executor
-baton memory install          # conductor 可直接运行；运行前告诉用户
+baton init                    # 首次安装；默认生成 v3 research 预设（含 research-conserve、v2-codex）
+baton memory install          # 可选，首次安装 mem0 + Ollama 本地语义记忆
 baton new <task>
 ```
 
-`doctor` 会检查 Codex、Ollama/记忆、台账、快照和 v1 指令告警。首次 init 会创建 `baton.json`；如果项目显式选择 Hermes backend，再按项目配置准备 `baton-exec-v2` profile。
-
-第一次使用（或 `doctor` 提示用户级基底缺失/过期）时，先运行 `baton harness base --init`，由 conductor 改写并运行 `baton harness base --approve`；之后每个任务的 harness 初稿都会自动带入已审定基底。
-
-### macOS 上经 Hermes 调用 Codex
-
-macOS 项目若要让 executor 通过 Hermes 使用 Codex，在 `baton.json` 写明 provider、profile、model 和 Hermes 支持的 effort：
-
-```json
-{
-  "executor": {
-    "backend": "hermes",
-    "provider": "openai-codex",
-    "hermes_profile": "baton-exec-v2",
-    "model": "gpt-6.1-sol",
-    "reasoning_effort": "max",
-    "sandbox_exec": true
-  }
-}
-```
-
-然后在用户终端运行 `baton init --upgrade-profile` 刷新 profile，用 `hermes -p baton-exec-v2 auth` 登录并选择 `openai-codex`，最后用 `baton doctor` 核对 provider、profile 凭据和 `sandbox-exec`。Hermes 不支持 Codex CLI 的 `ultra`、`service_tier`/Fast mode 透传；使用 `max`，doctor 会报告不支持的配置项。macOS 的 start、resume 和 escalation 都从同一份 executor 配置生成 Hermes argv。
-
-`baton memory install` 只写 `$BATON_HOME/venv` 和本地 Ollama 模型，运行前告诉用户。只有 Hermes 登录和带 `--user-approved` 的命令需要用户在自己的终端执行。写 `.baton/tasks/<task>/brief.md` 时填完整验收、允许/禁止路径和验证命令，并包含范围块：
-
-```markdown
-```baton-scope
-{"allow":["src"],"deny":["data"],"acceptance":["tests"],"frozen":[],"unfreeze":[],"verify":"auto"}
-```
-```
-
-`allow` 是 executor 可以修改或新建的路径，新写的回归测试放这里；`deny` 禁止触碰。
-`acceptance` 只列已存在、必须通过的测试文件或 pytest node id，它们属于锁定级，不能修改、删除或新建；不要列源码或待写的新测试，没有现成验收测试时留空 `[]`。
-`frozen` 列其他需要锁定的已有文件；`verify` 为 `auto` 时运行配置的验证命令，`none` 时跳过自动验证。验收标准的文字描述写在简报正文。
-`unfreeze` 是可选的已有测试文件精确路径列表，文件名必须符合 `test_*`、`*_test.*`、`*.spec.*` 或 `*.test.*`，只能列出原本会被 `supervision.test_command` 自动冻结的测试文件；不接受 glob、目录、路径不存在或 conftest.py、pytest.ini、tox.ini、pyproject/setup.cfg 的 pytest 段、package.json 的 test 键等测试配置。非空时必须用 `baton start <task> --user-approved`，并在 `/dev/tty` 逐字确认任务名。解除冻结的文件会记入 state 和 charter.md、不会进入 freeze manifest，但删除测试、减少测试数量、跳过测试等 ALERT 仍然生效。
-每个任务的 `harness.md` 是经 conductor 审定的长期项目上下文；固定小节、初稿来源和审定规则见 [`references/harness.md`](references/harness.md)。
-`baton start` 前必须完成审阅并删除待审标记，brief 只负责本任务的目标、范围和验收条件。
-审阅完成后运行 `baton harness approve <task>`；该命令会删除待审标记、记录审定时间和内容哈希，随后才能 `baton start`。
-
-确认简报后启动并交给后台等待：
-
-用 Codex 的 shell 工具在后台执行：
-
-```bash
-baton wait <task>
-```
-
-然后结束本回合；不要前台轮询或用 shell 的 `&`。`wait` 会在轮结束、监管时间到或额度低于阈值时自动唤醒。只要还有运行中的轮次或 monitor，处理完事件后就重新在后台启动 `baton wait <task>`。
+1. **编写 `brief.md` 与 `baton-scope`**：写明实验/开发目标、允许/禁止路径、锁定验收测试与验证命令：
+   ```markdown
+   ```baton-scope
+   {"allow":["src"],"deny":["data"],"acceptance":["tests"],"frozen":[],"unfreeze":[],"verify":"auto"}
+   ```
+   ```
+2. **开题设计门控（研究/复杂任务强烈建议，默认开启 `advisor.design_gate`）**：
+   ```bash
+   baton advise design <task> [--files 关键文件...]
+   ```
+   读 `.baton/advice/A001.md`，把缺失的防泄露不变量、需冻结的评测脚本和止损条件补进 `brief.md`（见 [`references/advisor.md`](references/advisor.md)）。
+3. **审定 `harness.md`**：删除仅面向 Conductor 主会话的流程指令，运行 `baton harness approve <task>`。Claude Executor 通过 `--append-system-prompt` 注入审定后的 harness（不脏化仓库里的 `CLAUDE.md`）。
+4. **启动并后台等待**：
+   ```bash
+   baton start <task>
+   baton wait <task>          # 在后台运行并结束本回合，不要前台轮询
+   ```
 
 ## 事件处理
 
-事件先读对应 references，再读 `baton wait` 输出的卷宗或路径。不能跳过监督简报直接裁决，也不能派子 agent 代替 monitor 审代码。
+事件先读对应 references，再读 `baton wait` 输出的卷宗、监督简报或路径。严禁跳过冷眼简报直接裁决。
 
 | 事件 | 先读 | 处理 |
 |---|---|---|
-| `REPORT` | `references/review.md`、监督简报、`baton diff --since report` | 逐条写 verdict，`baton rule` 后按结论 resume |
-| `DONE` | `references/review.md` 终审、task-final 简报 | 写 `ACCEPT`/`REVISE`，通过后 `baton close` |
-| `VIOLATION` | `references/review.md`、`references/monitor.md`、violation 简报 | 只选 `REVERT`、`ADOPT`、`ASK_USER`；恢复或修正后再续跑 |
-| `DECISION` | `references/decision.md`、决策请求 | 写单独决定文件，`baton decide`，再 resume |
-| `DRIFT` | `references/supervision.md`、轮中检查简报 | `baton steer` 或 `supervised --dismiss` |
-| `BREAKING` | `references/supervision.md`、轮中检查简报、回滚点 | 先停轮并核对证据，再裁决 |
-| `DRIFT_UNHANDLED` | `references/supervision.md`、未处理检查简报 | 先 steer 或 dismiss，不能直接放行 |
-| `MONITOR_FAILED` | `references/monitor.md`、stderr | 等待退出、`baton monitor --rerun`，或交用户；不得跳过简报 |
-| `BLOCKED` | executor 结果、`references/executor-protocol.md` | 补足缺失条件；权限、网络、费用先问用户 |
-| `FAILED` | stderr、`references/executor-protocol.md`、容量记录 | capacity 自动重试全部用完、或网络/TLS 失败时，先确认网络已恢复，再用一条纠偏消息说明情况并 resume；不要接手写代码 |
-| `STOPPED` | `references/supervision.md` | 写纠偏消息后 resume，或保持停止 |
-| `TICK` | `references/supervision.md`、`baton status` | 监管并运行 `baton supervised --verdict on_track/drifting/breaking`；monitor 关闭/lean 时它是兜底 |
-| `PAUSED_UNSUPERVISED` | `references/supervision.md`、状态快照 | 先监管，再 resume |
-| `QUOTA_LOW` | `references/supervision.md`、quota 输出和当前事件 | 提醒用户额度、重置时间和重置券；用户未要求停止则继续 wait |
-| `IDLE` | `references/supervision.md`、`baton status` | 没有运行中轮次，确认是否需要 start/resume |
+| `REPORT` | `references/review.md`、监督简报（Monitor 或连续 REVISE 升级后的 Advisor）、`baton diff --since report` | 逐条写 verdict，`baton rule` 入账后按结论 `resume` |
+| `DONE` | `references/review.md`、终审简报（默认由 **Advisor Neon XHigh** 单轨直审） | 写 `ACCEPT`/`REVISE`，通过后 `baton close` |
+| `VIOLATION` | `references/review.md`、违例简报（默认由 **Advisor Neon XHigh** 单轨直审） | 只选 `REVERT`、`ADOPT`、`ASK_USER`；Claude 下轮自动重置新会话 |
+| `DECISION` | `references/decision.md`、决策请求 | 重大路线/口径决策先跑 `baton advise decide <task> --decision D001`，再 `baton decide --advice A<n>` 并 `resume` |
+| `BLOCKED` / `FAILED` | stderr、stream-json 尾迹、`references/executor-protocol.md` | 方法卡壳可跑 `baton advise unblock <task> -q "..."`；容量/网络问题确认恢复后 `resume`，不接手写代码 |
+| `DRIFT` / `BREAKING` / `TICK` | `references/supervision.md` | L1 0-token 守卫（冻结校验 + stream-json 报错循环/权限拒批检查）常驻运行；处理告警后 `steer` 或 `supervised` |
+| `MONITOR_FAILED` | `references/monitor.md`、stderr | 重跑 `baton monitor <task> <dossier> --rerun` 或升级 `baton advise audit <task> --dossier <dossier> --rerun` |
+| `IDLE` | `baton status` | 没有运行中轮次，确认是否 `start`/`resume`/`close` |
 
-容量失败由 runner 自动立即重试，默认最多 3 次；仍失败时等待 15 分钟再试 1 次。重试成功会清零计数；全部用尽产生 `FAILED`/capacity，不能把它当成方法失败，需向用户说明并由 conductor 决定下一步。
+## 裁决、续跑与修正
 
-## 裁决、续跑和修正
-
-监督简报是独立证据，HTML 汇报只是 executor 的陈述。裁决文件用 `baton-verdict` fenced JSON，逐条回应 finding：
+监督简报（无论由 Hydrogen Monitor 还是 Neon Advisor 产出）均采用统一的 `F1/F2...` 偏离结构与 `baton-verdict` 裁决门槛：
 
 ```markdown
 ```baton-verdict
-{"conclusion":"APPROVE","findings":{"F1":{"decision":"reject","reason":"证据与范围一致"}}}
+{"conclusion":"APPROVE","findings":{"F1":{"decision":"reject","reason":"证据与章程一致"}}}
 ```
 ```
 
@@ -118,89 +80,34 @@ baton rule <task> <dossier> <verdict-file>
 baton resume <task> --verdict <dossier>
 ```
 
-普通回复、REPORT、DONE 和 VIOLATION 都必须先 `rule`。决策请求不要回写请求文件：新建 `.baton/messages/D001-decision.md` 或任意决定文件，然后：
+放宽冻结、`ADOPT` 违例或豁免验证仍必须由用户在自己终端加 `--user-approved` 确认（`baton amend ... --user-approved`、`baton close --waive ... --user-approved`）。
 
-```bash
-baton decide <task> D001 <decision-file>
-baton resume <task> --decision D001
-```
+## 预设、配额与 Statusline
 
-`ROLLBACK` 只在用户同意后运行 `baton rollback <task> <ref> --yes`。`VIOLATION` 的 `ADOPT`、放宽冻结、改配置等修正案必须由用户在自己的终端运行带 `--user-approved` 的命令：
-
-```bash
-baton amend <task> <amendment-file> --user-approved
-baton amend <task> --adopt <path> --user-approved
-```
-
-一次任务同一时间只运行一轮；不 commit、不 push（用户明确要求时例外）。
-
-## lean、记忆与整理
-
-在 `baton.json` 写 `{"mode":"lean"}` 可关闭 monitor、轮中监督和自动升级，只保留 executor 完成后 conductor 的一次裁决；`max_unsupervised_minutes` 变为 0。lean 仍须遵守范围、验证、日志和最终裁决门槛。
-
-`baton rule` 默认按 monitor 的记忆建议核准；需要拒绝时用 `--memory none` 或在 verdict 的 `memory` 中逐条写 `reject`。`baton rule` 入账成功后，Baton 会自动把核准条目写进台账和索引，再 resume。任务结束或每三份汇报可生成整理卷宗：读取 `memory.md` 和候选，写整理 verdict 后用 `baton rule --curation`；整理支持 merge、supersede、pin、unpin、retire，台账是唯一判例来源。回滚后挂起的来源条目，按建议选择 restore 或 retire。
-
-```bash
-baton memory verify
-baton memory seed <task>
-baton monitor <task> --curate
-baton rule <task> <curation-dossier> <verdict-file> --curation
-```
+- **切换预设**（`agy` 配额吃紧时降努力度保隔离）：
+  ```bash
+  baton preset list
+  baton preset use research-conserve [--task <task>]
+  baton preset use v2-codex          # 需要切回 v2 Codex 栈时
+  ```
+- **同步 `agy` Statusline**（查看 model、effort、context、5h/7d 剩余额度与 Baton 状态）：
+  ```bash
+  baton statusline install --agy
+  ```
+- **清理状态目录**：`baton gc --dry-run` / `baton gc`。
 
 ## 命令速查
 
 | 命令 | 作用 |
 |---|---|
-| `baton doctor` | 环境、profile、记忆、v1 指令和 monitor 隔离检查 |
-| `baton config [--json]` | 查看合并后的 v2 配置 |
-| `baton init [--migrate] [--upgrade-profile]` | 初始化、迁移 v1 配置、更新 profile |
-| `baton new <task>` | 生成简报模板 |
-| `baton harness approve <task>` | 审定 harness.md，删除待审标记并登记内容哈希 |
-| `baton harness base [--init\|--approve]` | 查看、生成或审定用户级 harness-base.md |
-| `baton start/resume/wait <task>` | 启动、按裁决续跑、后台等待 |
-| `baton status/diff <task>` | 监管快照和证据差异 |
-| `baton monitor <task> [dossier]` | 运行或重跑监督 monitor |
-| `baton rule <task> <dossier> <file>` | 逐条入账裁决 |
-| `baton decide <task> <D号> <file>` | 入账决定文件 |
-| `baton supervised <task> --verdict ...` | 记录 TICK 监管结论 |
-| `baton restore-frozen` / `baton amend` | 恢复冻结或提交用户核准的修正案 |
-| `baton preset list` / `baton preset use <名> [--task <任务>]` | 列出或切换 baton.json `presets` 里的执行者/monitor 预设；带 `--task` 时同步已启动任务的配置快照（该任务不能有运行中的一轮） |
-| `baton close <task>` | 验收通过后关闭任务；验证门槛因环境失败时可用 `--waive "原因" --user-approved` 豁免，或用 `--abandon "原因"` 放弃关闭 |
-| `baton close <task> --abandon "<原因>"` | 不再继续、也不会有 ACCEPT 终审的任务（如以 REPORT 结束）：账本记一条 abandon，任务 closed，并执行与 close 相同的卷宗代码、事件日志、frozen 文件副本和 task home 非会话内容清理 |
-| `baton memory install/verify/reindex` | 安装、校验、重建记忆索引 |
-
-## 文件布局
-
-项目内：`.baton/tasks/<task>/brief.md` 是简报，`reports/` 是 executor 汇报，`reviews/` 是 verdict，`decisions/` 是请求，`runs/` 保存轮次事件，`log.md` 是修改日志，`supervision.md` 是监管记录；根目录 `baton.json` 保存项目模型和执行设置。
-
-项目外：`$BATON_HOME/projects/<project-id>/` 保存 state、影子仓库、回滚备份、卷宗、记忆台账和 qdrant；`$BATON_HOME/venv` 是 mem0/mcp 环境。Hermes profile 在 `~/.hermes/profiles/baton-exec-v2`，不写入项目 git。任务级 Codex home 共享 `cache`、`plugins`、`packages` 软链接，Hermes 的可写 `skills`、`bin`、`cache` 保持任务私有。
-
-`BATON_HOME` 默认 `~/.baton`，可设到项目之外的其他磁盘。卷宗代码省略项目 git ignore 规则忽略的未跟踪文件；非 git 项目保持完整复制，省略统计写在 manifest 的 `code_omissions`。
-同一轮的检查卷宗只保留最新一份 `code/`；新的 `R` 加数字、`<task>-final`/`<task>-final-N` 或 `<task>-leg-N-violation` report 类卷宗会按创建顺序清理更早卷宗的 `code/`。`close` 和 `gc` 清理已 closed 任务的卷宗代码、事件日志、frozen 文件副本和 task home（保留会话、结果与审核元数据）。
-`baton gc --dry-run [--stale-days N]` 按类别预览文件数和字节数，`baton gc` 执行清理；默认清理 closed 任务及超过 14 天未更新的非运行任务。已清理卷宗不能重跑 monitor，回滚快照仍可使用。
-
-DONE/终审收尾：先用 `baton rule` 登记 ACCEPT，再运行 `baton close <task>`；close 成功会自动完成上述保留规则。没有终审时用 `--abandon`，它也会执行同样的清理。需要预览项目外状态释放量时，在 close 前或定期运行 `baton gc --dry-run`，长期未更新任务可加 `--stale-days N`。
-
-## v2 配置示例
-
-只在需要覆盖默认值时写这些 v2 键：
-
-```json
-{
-  "conductor": {"model": "gpt-6-astra", "reasoning_effort": "ultra", "service_tier": "priority", "disable_fast_mode": false, "council_for_major_decisions": true},
-  "monitor": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "final_reasoning_effort": "max"},
-  "executor": {
-    "backend": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "ultra",
-    "service_tier": "priority", "disable_fast_mode": false,
-    "toolsets": ["file", "terminal", "todo", "baton-memory"]
-  },
-  "memory": {"backend": "mem0", "embedder": {"provider": "ollama", "model": "qwen3-embedding:0.6b", "dims": 1024}},
-  "mode": "standard",
-  "supervision": {"interval_minutes": 30, "max_unsupervised_minutes": 70},
-  "approvals": {"delegate_to_conductor": false}
-}
-```
-
-无人值守运行（如评测）可在 `baton.json` 设 `"approvals": {"delegate_to_conductor": true}`；此时带 `--user-approved` 的命令由 conductor 直接执行，日常使用保持关闭。
-
-示例中的 `qwen3-embedding:0.6b` 是基础模型；实际运行使用由它派生的 `baton-qwen3-embed:latest`。
+| `baton doctor` | 检查 `agy` / `claude` / `codex` CLI、记忆、台账与隔离配置 |
+| `baton config [--json]` | 查看合并后的 v3 配置（含 conductor / advisor / monitor / executor） |
+| `baton init` | 初始化项目并生成 v3 `baton.json` 与内置预设 |
+| `baton new <task>` / `baton harness approve <task>` | 新建任务并审定 `harness.md` |
+| `baton advise {design\|decide\|audit\|unblock} <task>` | 无状态调用高阶 Advisor（默认 Neon XHigh）并落盘入账 |
+| `baton start/resume/steer/wait <task>` | 启动、按裁决/决定续跑、纠偏、后台等待 |
+| `baton rule <task> <dossier> <file>` | 逐条回应冷眼审计简报并登记裁决 |
+| `baton decide <task> <D号> <file> [--advice A号]` | 冻结决策请求并登记指挥决定 |
+| `baton preset list` / `baton preset use <名>` | 切换 `research` / `research-conserve` / `v2-codex` 预设 |
+| `baton statusline install [--agy]` | 安装 Claude Code 或 Antigravity CLI 状态栏 |
+| `baton close <task>` / `baton gc` | 终审收尾并清理卷宗代码与临时文件 |

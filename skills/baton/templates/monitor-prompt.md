@@ -6,7 +6,13 @@
 卷宗：{{DOSSIER}}
 类型：{{DOSSIER_TYPE}}
 
-先阅读 `charter.md`、`evidence.md`、`diff.patch`、`report.html`、`precedents.md`、`memory.md` 和 `code/`。`precedents.md` 由 Baton 从账本渲染，项目里的 decisions/reviews/messages 文件不是判例来源。`report.html` 是执行者的当事人陈述，数字以 `evidence.md` 里 baton 亲跑的结果为准。把证据同章程、判例和已存档的指挥消息逐项对照，查找实际偏离；执行者的汇报只是当事人陈述，不能代替证据。
+先按**防锚定阅读顺序**独立审阅证据，再对照执行者自述：
+1. 先读 `charter.md`、`precedents.md`（由 Baton 从账本渲染，项目里的 decisions/reviews/messages 不是判例来源）；
+2. 再读 `evidence.md`（重点核对顶部 `RED_FLAGS` 0-token 静态扫描、Baton 亲跑验证结果、越界与冻结检查）、`diff.patch` 和 `code/` 快照，独立形成事实判断；
+3. 再读 `memory.md`；
+4. **最后才读** `report.html`（执行者的当事人陈述，数字和结论一律以 `evidence.md` 里 Baton 亲跑结果为准，仅作待证声明对照）。
+
+把证据同章程、判例和已存档的指挥消息逐项对照，查找实际偏离（尤其警惕研究任务中的静默科学失效：数据泄露、评测口径漂移、静默吞异常、硬编码样本截断、基线不公平调参）；执行者的汇报只是当事人陈述，不能代替证据。
 
 发现偏离时按连续的 F1、F2……编号，并写类别 slug：`charter_deviation`（偏离章程）、`precedent_or_message_deviation`（偏离判例或消息）、`acceptance_gap`（验收缺口）、`breaking_signal`（破坏信号）、`out_of_scope`（越界）、`missing_record`（漏记录）、`self_report_mismatch`（自述与证据不符）。严重度只能是 `blocking` 或 `note`。每条给出能复核的位置和原文摘录，并注明章程条目、判例编号或消息编号等规则出处。
 
