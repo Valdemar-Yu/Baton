@@ -2,8 +2,9 @@
 """Antigravity CLI (`agy`) custom statusline synced from cc-statusline + Baton.
 
 Layout:
-  Line 1: 🤖 <model> [1M] ⚡<effort>  🧠 <bar> <used%> (<used>/<size>)  ⏳ 5h <rem%> ↻<reset>  📅 7d <rem%> ↻<reset>  🕐 <clock>
-  Line 2 (when inside a Baton project): Baton v3/v2 mode/preset, active task/leg/executor/monitor/advisor status
+  Line 1: 🤖 <model> [1M] ⚡<effort>  🧠 <bar> <used%> (<used>/<size>)  ✨ Gemini 5h <rem%> ↻<reset> · 7d <rem%> ↻<reset>  🕐 <clock>
+  Line 2: 🟠 Opus/3P 5h <rem%> ↻<reset> · 7d <rem%> ↻<reset>  [│  🏃 Baton ...]
+  Line 3 (only if inside a Baton project and Line 2 would overflow terminal width): 🏃 Baton ...
 
 Reads the JSON session payload piped by `agy` on stdin and prints ANSI-styled
 lines to stdout. Never crashes; missing fields degrade silently.
@@ -322,29 +323,24 @@ def _extract_bucket_remaining_and_reset(bucket):
                     break
                 except (TypeError, ValueError):
                     pass
-    if rem is None or not math.isfinite(rem):
-        return None
-    rem = max(0.0, min(100.0, rem))
     cd = fmt_countdown(
         resets_at=bucket.get("reset_time") or bucket.get("resets_at") or bucket.get("resetsAt"),
         reset_in_seconds=bucket.get("reset_in_seconds") or bucket.get("resetInSeconds"),
     )
+    # Protobuf v3 omits zero-valued float fields (`remaining_fraction: 0.0`) on exhaustion;
+    # if a valid reset timestamp/countdown is present, treat missing fraction as 0%.
+    if rem is None:
+        if cd:
+            rem = 0.0
+        else:
+            return None
+    if not math.isfinite(rem):
+        return None
+    rem = max(0.0, min(100.0, rem))
     return rem, cd
 
 
-def _model_family(model_hint):
-    hint = (model_hint or "").lower()
-    if "claude" in hint or "opus" in hint or "sonnet" in hint or "haiku" in hint:
-        return "claude"
-    if "gpt" in hint or "codex" in hint:
-        return "gpt"
-    if "argon" in hint:
-        return "argon"
-    return "gemini"
-
-
-def extract_quota_windows(data, model_hint):
-    """Extract (label, emoji, remaining_pct, countdown) for 5h and 7d windows."""
+def _collect_quota_buckets(data):
     buckets = {}
     q = data.get("quota")
     if isinstance(q, dict):
@@ -363,41 +359,108 @@ def extract_quota_windows(data, model_hint):
         for k, v in rl.items():
             if isinstance(v, dict) and str(k).lower() not in buckets:
                 buckets[str(k).lower()] = v
+    return buckets
 
-    if not buckets:
-        return []
 
-    fam = _model_family(model_hint)
-    candidates_5h = [
-        f"{fam}-5h", f"{fam}_5h", f"{fam}-five-hour", f"{fam}-rolling",
-        "gemini-5h", "gemini_5h", "five_hour", "five-hour", "5h", "rolling", "primary",
-    ]
-    candidates_7d = [
-        f"{fam}-weekly", f"{fam}_weekly", f"{fam}-7d", f"{fam}_7d", f"{fam}-seven-day",
-        "gemini-weekly", "gemini_weekly", "gemini-7d", "seven_day", "seven-day", "weekly", "7d", "secondary",
-    ]
-
-    def pick(cands, substring_tokens):
-        for key in cands:
-            if key in buckets:
-                parsed = _extract_bucket_remaining_and_reset(buckets[key])
-                if parsed is not None:
-                    return parsed
+def _pick_bucket(buckets, exact_keys, family_tokens=None, window_tokens=None, exclude_tokens=()):
+    for key in exact_keys:
+        if key in buckets:
+            parsed = _extract_bucket_remaining_and_reset(buckets[key])
+            if parsed is not None:
+                return parsed
+    if family_tokens and window_tokens:
         for key, val in buckets.items():
-            if any(tok in key for tok in substring_tokens):
+            if any(ex in key for ex in exclude_tokens):
+                continue
+            if any(ft in key for ft in family_tokens) and any(wt in key for wt in window_tokens):
                 parsed = _extract_bucket_remaining_and_reset(val)
                 if parsed is not None:
                     return parsed
-        return None
+    return None
 
-    out = []
-    w5 = pick(candidates_5h, ("5h", "five_hour", "five-hour"))
-    if w5 is not None:
-        out.append(("5h", "⏳", w5[0], w5[1]))
-    w7 = pick(candidates_7d, ("weekly", "7d", "seven_day", "seven-day"))
-    if w7 is not None:
-        out.append(("7d", "📅", w7[0], w7[1]))
-    return out
+
+def extract_quota_pools(data):
+    """Extract independent Gemini and Opus/3P quota pools from `agy` statusLine payload.
+
+    Returns dict with keys `"gemini"` and `"opus"`, each mapping to a list of
+    `(label, remaining_pct, countdown)` tuples for 5h / 7d windows.
+    """
+    buckets = _collect_quota_buckets(data)
+    if not buckets:
+        return {"gemini": [], "opus": []}
+
+    gemini_5h = _pick_bucket(
+        buckets,
+        exact_keys=("gemini-5h", "gemini_5h", "gemini-five-hour", "gemini-rolling"),
+        family_tokens=("gemini",),
+        window_tokens=("5h", "five_hour", "five-hour", "rolling"),
+        exclude_tokens=("argon", "3p", "claude", "opus", "gpt"),
+    )
+    gemini_7d = _pick_bucket(
+        buckets,
+        exact_keys=("gemini-weekly", "gemini_weekly", "gemini-7d", "gemini_7d", "gemini-seven-day"),
+        family_tokens=("gemini",),
+        window_tokens=("weekly", "7d", "seven_day", "seven-day"),
+        exclude_tokens=("argon", "3p", "claude", "opus", "gpt"),
+    )
+
+    opus_5h = _pick_bucket(
+        buckets,
+        exact_keys=("3p-5h", "3p_5h", "claude-5h", "claude_5h", "opus-5h", "claude-gpt-5h", "partner-5h"),
+        family_tokens=("3p", "claude", "opus", "partner"),
+        window_tokens=("5h", "five_hour", "five-hour", "rolling"),
+    )
+    opus_7d = _pick_bucket(
+        buckets,
+        exact_keys=(
+            "3p-weekly", "3p_weekly", "3p-7d", "3p_7d",
+            "claude-weekly", "claude_weekly", "claude-7d", "claude_7d",
+            "opus-weekly", "opus_weekly", "claude-gpt-weekly", "partner-weekly",
+        ),
+        family_tokens=("3p", "claude", "opus", "partner"),
+        window_tokens=("weekly", "7d", "seven_day", "seven-day"),
+    )
+
+    # Generic fallback when only unnamed windows (five_hour / seven_day / 5h / weekly) exist
+    if gemini_5h is None and opus_5h is None:
+        gemini_5h = _pick_bucket(buckets, exact_keys=("five_hour", "five-hour", "5h", "rolling", "primary"))
+    if gemini_7d is None and opus_7d is None:
+        gemini_7d = _pick_bucket(buckets, exact_keys=("seven_day", "seven-day", "weekly", "7d", "secondary"))
+
+    gemini_out = []
+    if gemini_5h is not None:
+        gemini_out.append(("5h", gemini_5h[0], gemini_5h[1]))
+    if gemini_7d is not None:
+        gemini_out.append(("7d", gemini_7d[0], gemini_7d[1]))
+
+    opus_out = []
+    if opus_5h is not None:
+        opus_out.append(("5h", opus_5h[0], opus_5h[1]))
+    if opus_7d is not None:
+        opus_out.append(("7d", opus_7d[0], opus_7d[1]))
+
+    return {"gemini": gemini_out, "opus": opus_out}
+
+
+def _format_quota_pool(title, title_color, windows):
+    if not windows:
+        return ""
+    segs = []
+    for label, rem, cd in windows:
+        txt = f"{label} " + c(f"{rem:.0f}%", pct_color(rem))
+        if cd:
+            txt += c(f" ↻{cd}", "90")
+        segs.append(txt)
+    return c(title, title_color) + " " + c(" · ", "90").join(segs)
+
+
+def extract_quota_windows(data, model_hint=""):
+    """Legacy helper returning (label, emoji, remaining_pct, countdown) for primary pool."""
+    pools = extract_quota_pools(data)
+    hint = (model_hint or "").lower()
+    use_opus = any(k in hint for k in ("claude", "opus", "sonnet", "haiku", "3p"))
+    chosen = pools["opus"] if (use_opus and pools["opus"]) else (pools["gemini"] or pools["opus"])
+    return [(lbl, "⏳" if lbl == "5h" else "📅", rem, cd) for lbl, rem, cd in chosen]
 
 
 # ---- Baton status integration ----
@@ -577,7 +640,8 @@ def _maybe_dump_debug(raw_bytes):
 
 def render(data):
     ctx = extract_context(data)
-    model_display, effort, model_hint = extract_model_and_effort(data, ctx)
+    model_display, effort, _model_hint = extract_model_and_effort(data, ctx)
+    tw = term_width(data)
 
     model_seg = c(f"🤖 {model_display}", "1;36")
     if effort:
@@ -597,13 +661,12 @@ def render(data):
             ctx_seg = c("🧠 " + bar(used_pct), used_color(used_pct)) + f" {used_pct:.0f}%"
         parts.append(ctx_seg)
 
-    for label, emoji, rem, cd in extract_quota_windows(data, model_hint):
-        txt = f"{emoji} {label} " + c(f"{rem:.0f}%", pct_color(rem))
-        if cd:
-            txt += c(f" ↻{cd}", "90")
-        parts.append(txt)
+    pools = extract_quota_pools(data)
+    gemini_seg = _format_quota_pool("✨ Gemini", "1;34", pools["gemini"])
+    if gemini_seg:
+        parts.append(gemini_seg)
 
-    # Responsive clock
+    # Responsive clock on Line 1
     sep = "  "
     base_w = disp_width(sep.join(parts))
     lt = time.localtime()
@@ -612,7 +675,7 @@ def render(data):
         time.strftime("%m-%d %H:%M", lt),
         time.strftime("%H:%M", lt),
     ]
-    avail = term_width(data) - base_w - disp_width(sep) - 1
+    avail = tw - base_w - disp_width(sep) - 1
     for v in variants:
         seg_txt = f"🕐 {v}"
         if disp_width(seg_txt) <= avail:
@@ -620,9 +683,22 @@ def render(data):
             break
 
     lines = [sep.join(parts)]
+
+    opus_seg = _format_quota_pool("🟠 Opus/3P", "1;38;5;208", pools["opus"])
     b_line = baton_line(data)
-    if b_line:
+    if opus_seg and b_line:
+        divider = c("  │  ", "90")
+        combined = opus_seg + divider + b_line
+        if disp_width(combined) <= tw - 1:
+            lines.append(combined)
+        else:
+            lines.append(opus_seg)
+            lines.append(b_line)
+    elif opus_seg:
+        lines.append(opus_seg)
+    elif b_line:
         lines.append(b_line)
+
     return "\n".join(lines)
 
 

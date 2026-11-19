@@ -371,20 +371,33 @@ class V3ResearchUnitTests(unittest.TestCase):
             "quota": {
                 "gemini-5h": {"remaining_fraction": 0.85, "reset_in_seconds": 7200},
                 "gemini-weekly": {"remaining_fraction": 0.91, "reset_in_seconds": 432000},
+                "3p-5h": {"remaining_fraction": 0.99, "reset_in_seconds": 14400},
+                "3p-weekly": {"reset_in_seconds": 600000},  # Protobuf v3 zero-value omission -> 0%
             },
             "workspace": {"current_dir": project.root},
-            "terminal_width": 140,
+            "terminal_width": 160,
         }
         rendered = agy_statusline.render(payload)
-        self.assertIn("Gemini 4 Carbon [1M]", rendered)
-        self.assertIn("⚡high", rendered)
-        self.assertIn("22%", rendered)
-        self.assertIn("5h", rendered)
-        self.assertIn("85%", rendered)
-        self.assertIn("7d", rendered)
-        self.assertIn("91%", rendered)
-        self.assertIn("Baton v3", rendered)
-        self.assertIn("agy:claude-opus-5-5-high", rendered)
+        lines = rendered.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("Gemini 4 Carbon [1M]", lines[0])
+        self.assertIn("⚡high", lines[0])
+        self.assertIn("22%", lines[0])
+        self.assertIn("Gemini", lines[0])
+        self.assertIn("85%", lines[0])
+        self.assertIn("91%", lines[0])
+        self.assertIn("Opus/3P", lines[1])
+        self.assertIn("99%", lines[1])
+        self.assertIn("0%", lines[1])
+        self.assertIn("Baton v3", lines[1])
+        self.assertIn("agy:claude-opus-5-5-high", lines[1])
+
+        # Narrow terminal splits Baton onto Line 3 instead of wrapping Line 2
+        narrow = dict(payload, terminal_width=95)
+        narrow_lines = agy_statusline.render(narrow).splitlines()
+        self.assertEqual(len(narrow_lines), 3)
+        self.assertIn("Opus/3P", narrow_lines[1])
+        self.assertIn("Baton v3", narrow_lines[2])
 
         # Home dir containing only global $BATON_HOME must NOT be treated as a Baton project
         fake_home = os.path.join(self._tmp, "fakehome")
