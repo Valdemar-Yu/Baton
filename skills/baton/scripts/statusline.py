@@ -115,9 +115,12 @@ def short_reset(ts):
 
 def codex_line(session):
     ex = executor_config(session)
-    if str(ex.get("backend") or "").lower() == "claude":
-        head = c(f"Executor Claude {ex.get('model', 'opus')}·{ex.get('reasoning_effort', 'xhigh')}", "36")
-        return head
+    b = str(ex.get("backend") or "").lower()
+    if b == "agy":
+        return c(f"Executor Agy {ex.get('model', 'claude-opus-5-5-high')}", "36")
+    if b == "claude":
+        cbin = ex.get("claude_bin") or "claude"
+        return c(f"Executor {cbin} {ex.get('model', 'opus')}·{ex.get('reasoning_effort', 'xhigh')}", "36")
     head = c(f"Codex {ex.get('model', '?')}·{ex.get('reasoning_effort', '?')}", "36")
     data = codex_quota.get(block=False)
     if not data or not data.get("windows"):

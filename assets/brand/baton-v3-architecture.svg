@@ -116,15 +116,15 @@
     <path d="M 14 0 L 338 0 Q 352 0 352 14 L 352 36 L 0 36 L 0 14 Q 0 0 14 0 Z" fill="#ECFDF7" />
     <line x1="0" y1="36" x2="352" y2="36" stroke="#B7EEDB" stroke-width="1.2" />
     <text x="16" y="24" class="font-sans card-title" fill="#0B6E55">Executor · 唯一代码写入者</text>
-    <rect x="242" y="8" width="96" height="20" rx="10" fill="#0F9473" />
-    <text x="290" y="22" text-anchor="middle" class="font-mono badge-txt" fill="#FFFFFF">claude -p</text>
+    <rect x="218" y="8" width="120" height="20" rx="10" fill="#0F9473" />
+    <text x="278" y="22" text-anchor="middle" class="font-mono badge-txt" fill="#FFFFFF">agy / claude-0x</text>
 
-    <rect x="16" y="46" width="268" height="24" rx="6" fill="#F4FEFA" stroke="#9EE3CB" stroke-width="1" />
-    <text x="150" y="62" text-anchor="middle" class="font-mono badge-txt" fill="#0B6E55">Claude Opus (XHigh) · --safe-mode</text>
+    <rect x="16" y="46" width="320" height="24" rx="6" fill="#F4FEFA" stroke="#9EE3CB" stroke-width="1" />
+    <text x="176" y="62" text-anchor="middle" class="font-mono badge-txt" fill="#0B6E55">优先 agy Opus 5.5 (High) → 切 claude-00/01/02</text>
 
-    <text x="16" y="90" class="font-sans body">• 专注代码实现、实验脚本、调试与测试验证</text>
-    <text x="16" y="110" class="font-sans body">• --append-system-prompt 注入审定 harness</text>
-    <text x="16" y="130" class="font-sans body">• 禁用 Bash(baton *) / git push；违例后自动换新会话</text>
+    <text x="16" y="90" class="font-sans body">• 优先消耗 agy Opus 配额，不碰个人 Anthropic 账号</text>
+    <text x="16" y="110" class="font-sans body">• 需 xhigh 或额度不足时一键切 claude-00/01/02</text>
+    <text x="16" y="130" class="font-sans body">• 跨后端/违例自动换新会话并附交接包，禁改账本</text>
   </g>
 
   <!-- Baton CLI Deterministic Base + Single-Track Router -->

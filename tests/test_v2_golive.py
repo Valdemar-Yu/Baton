@@ -34,9 +34,10 @@ class GoliveTests(unittest.TestCase):
     def test_skill_defaults_are_v2_and_init_writes_v2_keys(self):
         cfg = json.loads((ROOT / "skills/baton/config.json").read_text(encoding="utf-8"))
         executor = cfg["executor"]
-        self.assertEqual(executor["backend"], "claude")
-        self.assertEqual(executor["model"], "opus")
-        self.assertEqual(executor["reasoning_effort"], "xhigh")
+        self.assertEqual(executor["backend"], "agy")
+        self.assertEqual(executor["model"], "claude-opus-5-5-high")
+        self.assertEqual(executor["reasoning_effort"], "high")
+        self.assertEqual(executor["claude_bin"], "claude-00")
         self.assertEqual(executor["toolsets"], ["file", "terminal", "todo", "baton-memory"])
         for key in ("service_tier", "disable_fast_mode", "sandbox", "extra_config"):
             self.assertIn(key, executor)
@@ -51,8 +52,8 @@ class GoliveTests(unittest.TestCase):
         self.assertEqual(written["conductor"]["model"], "gemini-4-carbon-high")
         self.assertEqual(written["advisor"]["model"], "gemini-4-neon-xhigh")
         self.assertEqual(written["monitor"]["model"], "gemini-4-hydrogen-xhigh")
-        self.assertEqual(written["executor"]["backend"], "claude")
-        self.assertEqual(written["executor"]["model"], "opus")
+        self.assertEqual(written["executor"]["backend"], "agy")
+        self.assertEqual(written["executor"]["model"], "claude-opus-5-5-high")
 
     def test_review_reference_example_uses_adopt_reject_and_parses(self):
         text = (ROOT / "skills/baton/references/review.md").read_text(encoding="utf-8")

@@ -72,8 +72,9 @@ class BatonJsonTests(unittest.TestCase):
         self.assertEqual(cfg["conductor"]["model"], "gemini-4-carbon-high")
         self.assertTrue(cfg["advisor"]["enabled"])
         self.assertEqual(cfg["advisor"]["model"], "gemini-4-neon-xhigh")
-        self.assertEqual(cfg["executor"]["backend"], "claude")
-        self.assertEqual(cfg["executor"]["model"], "opus")
+        self.assertEqual(cfg["executor"]["backend"], "agy")
+        self.assertEqual(cfg["executor"]["model"], "claude-opus-5-5-high")
+        self.assertEqual(cfg["executor"]["claude_bin"], "claude-00")
         self.assertEqual(cfg["monitor"]["backend"], "agy")
         self.assertEqual(cfg["monitor"]["model"], "gemini-4-hydrogen-xhigh")
 

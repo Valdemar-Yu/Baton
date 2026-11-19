@@ -551,8 +551,11 @@ def baton_line(data):
     ex_effort = ex.get("reasoning_effort")
     parts = [head]
     if ex_model:
-        b_tag = f"{ex_backend}:" if ex_backend else ""
-        e_tag = f"·{ex_effort}" if ex_effort else ""
+        if ex_backend == "claude" and ex.get("claude_bin"):
+            b_tag = f"{ex['claude_bin']}:"
+        else:
+            b_tag = f"{ex_backend}:" if ex_backend else ""
+        e_tag = f"·{ex_effort}" if ex_effort and ex_backend != "agy" else ""
         parts.append(f"exec {b_tag}{ex_model}{e_tag}")
     parts.append("空闲")
     if latest:

@@ -13,7 +13,7 @@ Baton v3 是面向研究型开发与实验工程（Research Baton）的全新大
 | **Conductor（日常总控）** | `gemini-4-carbon-high` / `agy` 主会话 | 持续会话 | 起草 `brief.md` / `harness.md`、驱动状态机、判断是否需要 `baton advise`、逐条 `baton rule` / `baton decide` / `baton close`。严禁直接改代码、严禁绕过冷眼审计自裁。 |
 | **Advisor（首席设计 & 高阶终审）** | `gemini-4-neon-xhigh` / `agy -p` | **严格无状态冷启动** | ① 开题/大修设计把关（`baton advise design`）；② 关键决策权衡与判例草案（`baton advise decide`）；③ 终审/违例/连续≥2次 REVISE 的单轨冷眼审计（`baton advise audit` 或自动路由）；④ 卡壳根因诊断（`baton advise unblock`）。 |
 | **Monitor（常规冷眼审计）** | `gemini-4-hydrogen-xhigh` / `agy -p` | **只读卷宗冷启动** | 对常规 `REPORT` 卷宗执行跨家族冷眼证据核对，逐条输出偏离（`F1/F2...`）和记忆候选建议；不做设计/路线拍板。 |
-| **Executor（代码执行者）** | `claude` CLI / `opus` (`--effort xhigh`) | 按阶段 `--resume` | 唯一代码写入者；按简报实现、跑测试、追加 `.baton/log.md`、交大修改报告 `R*.html` 并按 `leg-result.schema.json` 输出。 |
+| **Executor（代码执行者）** | 默认 `agy -p` / `claude-opus-5-5-high`（优先消耗 `agy` Opus 额度）；按需切 `claude-00/01/02`（`claude-accounts` · `opus` `xhigh`） | 按阶段 `--conversation` / `--resume` | 唯一代码写入者；按简报实现、跑测试、追加 `.baton/log.md`、交大修改报告 `R*.html` 并按 `leg-result.schema.json` 输出。 |
 
 ## 二、为什么选择「单轨冷眼 + 0-token 轮中守卫」（Neon XHigh 架构裁决）
 
@@ -58,7 +58,8 @@ Baton v3 是面向研究型开发与实验工程（Research Baton）的全新大
 
 ## 六、内置预设与 v2 兼容
 
-`baton init` 默认写入三套预设，随时可用 `baton preset use <name>` 切换：
-- `research`（默认）：`agy` Carbon(High) + Neon(XHigh) + Hydrogen(XHigh) + `claude` Opus(XHigh)
-- `research-conserve`：`agy` 额度紧张时降 Monitor/Advisor 到 `high`，不取消独立冷眼边界
+`baton init` 默认写入内置预设，随时可用 `baton preset use <name> [--task <task>]` 切换：
+- `research`（默认）：优先消耗 `agy` Opus 额度——`agy` Carbon(High) + Neon(XHigh) + Hydrogen(XHigh) + `agy` `claude-opus-5-5-high`
+- `research-conserve`：`agy` 5h 额度紧张时降 Monitor/Advisor 到 `high`，不取消独立冷眼边界
+- `claude-00` / `claude-01` / `claude-02`：通过 `claude-accounts` 封装（`executor.claude_bin`）切换 Executor 到对应 Claude 订阅账号的 `opus` (`xhigh`)；跨后端切换时自动重置新会话并附带压缩交接包
 - `v2-codex`：完整兼容 Baton v2 的 Codex/Hermes 编排流

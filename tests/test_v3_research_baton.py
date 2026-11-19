@@ -75,9 +75,10 @@ class V3ResearchUnitTests(unittest.TestCase):
         self.assertEqual(cfg["monitor"]["backend"], "agy")
         self.assertEqual(cfg["monitor"]["model"], "gemini-4-hydrogen-xhigh")
         self.assertFalse(cfg["monitor"]["midleg_llm_checks"])
-        self.assertEqual(cfg["executor"]["backend"], "claude")
-        self.assertEqual(cfg["executor"]["model"], "opus")
-        self.assertEqual(cfg["executor"]["reasoning_effort"], "xhigh")
+        self.assertEqual(cfg["executor"]["backend"], "agy")
+        self.assertEqual(cfg["executor"]["model"], "claude-opus-5-5-high")
+        self.assertEqual(cfg["executor"]["reasoning_effort"], "high")
+        self.assertEqual(cfg["executor"]["claude_bin"], "claude-00")
 
         # Switch preset to research-conserve and verify
         with redirect_stdout(io.StringIO()):
@@ -85,7 +86,17 @@ class V3ResearchUnitTests(unittest.TestCase):
         cfg2 = baton.Project(self.project_root).config
         self.assertEqual(cfg2["monitor"]["model"], "gemini-4-hydrogen-high")
         self.assertEqual(cfg2["advisor"]["model"], "gemini-4-neon-high")
-        self.assertEqual(cfg2["executor"]["backend"], "claude")
+        self.assertEqual(cfg2["executor"]["backend"], "agy")
+
+        # Switch presets to claude-00 / claude-01 / claude-02 (claude-accounts)
+        for slug in ("claude-00", "claude-01", "claude-02"):
+            with redirect_stdout(io.StringIO()):
+                baton.cmd_preset(project, argparse.Namespace(action="use", name=slug, task=[]))
+            cfg_c = baton.Project(self.project_root).config
+            self.assertEqual(cfg_c["executor"]["backend"], "claude")
+            self.assertEqual(cfg_c["executor"]["claude_bin"], slug)
+            self.assertEqual(cfg_c["executor"]["model"], "opus")
+            self.assertEqual(cfg_c["executor"]["reasoning_effort"], "xhigh")
 
         # Switch preset to v2-codex and verify v2 compatibility
         with redirect_stdout(io.StringIO()):
@@ -176,14 +187,17 @@ class V3ResearchUnitTests(unittest.TestCase):
         self.assertEqual(synth["status"], "blocked")
         self.assertTrue(synth["interrupted"])
 
-    # ---- 4. Claude executor command & session reset rules ----
+    # ---- 4. Claude executor command (with claude-00/01/02) & session reset rules ----
     def test_claude_command_and_session_reset(self):
         project = self._init_project()
-        cfg = project.config
+        with redirect_stdout(io.StringIO()):
+            baton.cmd_preset(project, argparse.Namespace(action="use", name="claude-01", task=[]))
+        cfg = baton.Project(self.project_root).config
         cmd = baton.claude_command(
             project, "start", None, cfg=cfg, task="exp1", leg_n=1,
             system_prompt_text="approved harness", session_id="uuid-1", reset_session=True,
         )
+        self.assertTrue(cmd[0].endswith("claude-01"))
         self.assertIn("--safe-mode", cmd)
         self.assertNotIn("--bare", cmd)
         self.assertIn("--model", cmd)
@@ -204,16 +218,55 @@ class V3ResearchUnitTests(unittest.TestCase):
         self.assertIn("--resume", cmd_res)
         self.assertEqual(cmd_res[cmd_res.index("--resume") + 1], "uuid-1")
 
-        # Reset triggers
-        st = {"thread_id": "uuid-1", "claude_session_harness_sha256": "aaa", "claude_session_leg_count": 1, "legs": [{"status": "report"}]}
+        # Reset triggers (including switching backend from agy -> claude!)
+        st = {"thread_id": "uuid-1", "claude_session_harness_sha256": "aaa", "claude_session_leg_count": 1,
+              "legs": [{"status": "report", "backend": "claude"}]}
         self.assertEqual(baton._claude_should_reset_session(st, "aaa", cfg)[0], False)
         self.assertEqual(baton._claude_should_reset_session(st, "bbb", cfg), (True, "harness_or_charter_changed"))
-        st_viol = dict(st, legs=[{"status": "violation"}])
+        st_switch = dict(st, legs=[{"status": "report", "backend": "agy"}])
+        self.assertEqual(baton._claude_should_reset_session(st_switch, "aaa", cfg), (True, "backend_switched"))
+        st_viol = dict(st, legs=[{"status": "violation", "backend": "claude"}])
         self.assertEqual(baton._claude_should_reset_session(st_viol, "aaa", cfg), (True, "after_violation"))
         st_rb = dict(st, rolled_back_since_leg=True)
         self.assertEqual(baton._claude_should_reset_session(st_rb, "aaa", cfg), (True, "after_rollback"))
         st_max = dict(st, claude_session_leg_count=4)
         self.assertEqual(baton._claude_should_reset_session(st_max, "aaa", cfg)[0], True)
+
+    # ---- 4b. Agy Opus executor command & stream-json parser ----
+    def test_agy_executor_command_and_stream_parser(self):
+        project = self._init_project()
+        cfg = project.config
+        cmd = baton.agy_executor_command(project, "start", None, "implement feature", cfg=cfg, reset_session=True)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "claude-opus-5-5-high")
+        self.assertIn("--dangerously-skip-permissions", cmd)
+        self.assertIn("--disable-slash-commands", cmd)
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
+        self.assertIn("--json-schema", cmd)
+        self.assertNotIn("--conversation", cmd)
+        self.assertEqual(cmd[cmd.index("-p") + 1], "implement feature")
+
+        cmd_res = baton.agy_executor_command(project, "resume", "conv-42", "next step", cfg=cfg, reset_session=False)
+        self.assertEqual(cmd_res[cmd_res.index("--conversation") + 1], "conv-42")
+
+        stream_path = os.path.join(self._tmp, "agy-events.jsonl")
+        lines = [
+            {"event": "init", "conversation_id": "conv-42", "init": {"model": "claude-opus-5-5-high"}},
+            {"event": "step_update", "step_update": {"conversation_id": "conv-42", "step_type": "run_command", "command": "pytest -q", "exit_code": 0}},
+            {"event": "result", "result": {
+                "conversation_id": "conv-42", "status": "SUCCESS", "duration_seconds": 6.4, "num_turns": 2,
+                "usage": {"input_tokens": 12000, "output_tokens": 300},
+                "structured_output": {"status": "done", "summary": "implemented", "artifact": "", "change_size": "minor", "memory_used": []},
+            }},
+        ]
+        with open(stream_path, "w", encoding="utf-8") as f:
+            for item in lines:
+                f.write(json.dumps(item) + "\n")
+        parsed = v3_research.parse_agy_stream(stream_path)
+        self.assertEqual(parsed["conversation_id"], "conv-42")
+        self.assertEqual(parsed["model"], "claude-opus-5-5-high")
+        self.assertEqual(parsed["structured_output"]["status"], "done")
+        self.assertEqual(len(parsed["tool_calls"]), 1)
+        self.assertEqual(parsed["tool_calls"][0]["command"], "pytest -q")
 
     # ---- 5. Agy isolated command & parser ----
     def test_agy_command_and_json_parser(self):
@@ -331,13 +384,43 @@ class V3ResearchUnitTests(unittest.TestCase):
         self.assertIn("7d", rendered)
         self.assertIn("91%", rendered)
         self.assertIn("Baton v3", rendered)
-        self.assertIn("claude:opus·xhigh", rendered)
+        self.assertIn("agy:claude-opus-5-5-high", rendered)
 
         # Home dir containing only global $BATON_HOME must NOT be treated as a Baton project
         fake_home = os.path.join(self._tmp, "fakehome")
         os.makedirs(os.path.join(fake_home, ".baton"), exist_ok=True)
         with mock.patch.dict(os.environ, {"BATON_HOME": os.path.join(fake_home, ".baton")}):
             self.assertIsNone(agy_statusline._find_baton_root(fake_home))
+
+    # ---- 9. Quota-exhaustion preset switch hints ----
+    def test_quota_switch_hints_in_leg_event_text(self):
+        project = self._init_project()
+        with redirect_stdout(io.StringIO()):
+            baton.cmd_new(project, argparse.Namespace(task="q1", brief=None))
+        leg_agy = {
+            "n": 1,
+            "status": "failed",
+            "backend": "agy",
+            "model": "claude-opus-5-5-high",
+            "failure_kind": "quota",
+            "started_at": 1000,
+            "ended_at": 1010,
+            "error": "quota exhausted",
+        }
+        text_agy = baton.leg_event_text(project, "q1", leg_agy)
+        self.assertIn("baton preset use claude-00 --task q1", text_agy)
+
+        def _set_claude(st):
+            cfg = baton.config_for_state(project, st)
+            cfg["executor"]["backend"] = "claude"
+            cfg["executor"]["claude_bin"] = "claude-00"
+            st["config_snapshot"] = cfg
+
+        project.update_state("q1", _set_claude)
+        leg_claude = dict(leg_agy, backend="claude", model="opus")
+        text_claude = baton.leg_event_text(project, "q1", leg_claude)
+        self.assertIn("baton preset use claude-01 --task q1", text_claude)
+        self.assertIn("claude-02 / research", text_claude)
 
 
 if __name__ == "__main__":

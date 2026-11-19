@@ -15,7 +15,7 @@ description: >-
 | **Conductor** | `agy` 主会话，`gemini-4-carbon-high` | 日常总控、起草简报与范围、决定何时调 `baton advise`、逐条 `baton rule` / `decide` / `close` |
 | **Advisor** | `agy -p` 无状态只读进程，`gemini-4-neon-xhigh` | 开题设计把关（`design`）、关键决策权衡（`decide`）、终审/违例/连续≥2次 REVISE 的**单轨冷眼审计**（`audit`）、卡壳诊断（`unblock`） |
 | **Monitor** | `agy -p` 隔离只读进程，`gemini-4-hydrogen-xhigh` | 常规 `REPORT` 卷宗的跨家族冷眼证据核对（偏离清单 `F1/F2...` + 记忆建议）；不改代码、不做设计拍板 |
-| **Executor** | `claude -p`（`--safe-mode`），`opus` / `xhigh` | 唯一代码写入者；按简报改代码、跑验证、追加 `.baton/log.md`、交大修改 `R*.html` 汇报并输出结构化 `leg-result` |
+| **Executor** | 默认 `agy -p`（`claude-opus-5-5-high`，优先消耗 `agy` Opus 额度）；按需切 `claude-00/01/02`（`claude-accounts` · `opus` / `xhigh`） | 唯一代码写入者；按简报改代码、跑验证、追加 `.baton/log.md`、交大修改 `R*.html` 汇报并输出结构化 `leg-result` |
 
 > **单轨冷眼铁律**：每份封存卷宗只由**一位**冷眼角色审计——常规 `REPORT` 归 Hydrogen Monitor，终审（`DONE`）/ 违例（`VIOLATION`）/ 连续 ≥2 次 `REVISE` 自动直达 Neon Advisor（跳过 Monitor，既省 `agy` 配额又防锚定）。
 > **降努力度不降制度**：`agy` 5h 额度吃紧时，执行 `baton preset use research-conserve` 把 Monitor/Advisor 降到 `high`，绝不取消独立冷眼边界。
@@ -84,11 +84,15 @@ baton resume <task> --verdict <dossier>
 
 ## 预设、配额与 Statusline
 
-- **切换预设**（`agy` 配额吃紧时降努力度保隔离）：
+- **切换预设**（优先消耗 `agy` Opus 额度；额度吃紧或需要 `xhigh` 时切 `claude-00/01/02`）：
   ```bash
   baton preset list
-  baton preset use research-conserve [--task <task>]
-  baton preset use v2-codex          # 需要切回 v2 Codex 栈时
+  baton preset use research                    # 默认：优先用 agy 的 claude-opus-5-5-high
+  baton preset use research-conserve           # agy 5h 额度吃紧时降 Monitor/Advisor 到 high
+  baton preset use claude-00 [--task <task>]   # 切到 claude-accounts 账号 00（claude-00 · Opus XHigh）
+  baton preset use claude-01 [--task <task>]   # 切到 claude-accounts 账号 01（claude-01 · Opus XHigh）
+  baton preset use claude-02 [--task <task>]   # 切到 claude-accounts 账号 02（claude-02 · Opus XHigh）
+  baton preset use v2-codex                    # 需要切回 v2 Codex 栈时
   ```
 - **同步 `agy` Statusline**（查看 model、effort、context、5h/7d 剩余额度与 Baton 状态）：
   ```bash

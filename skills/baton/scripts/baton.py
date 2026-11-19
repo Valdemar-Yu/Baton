@@ -81,7 +81,7 @@ GIT_LOCAL_ENV_VARS = (
 TASK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}")
 HERMES_PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-EXECUTOR_BACKENDS = {"codex", "hermes", "claude"}
+EXECUTOR_BACKENDS = {"codex", "hermes", "claude", "agy"}
 MONITOR_BACKENDS = {"codex", "hermes", "claude", "agy"}
 ADVISOR_BACKENDS = {"agy", "claude", "codex"}
 BATON_GITIGNORE = ["runs/", "*.lock", "statusline-saved.json", "tasks/*/state.json", "rollback-backup/", "project-id"]
@@ -355,7 +355,10 @@ def validate_config(cfg):
     executor = cfg["executor"]
     backend = executor.get("backend", "codex")
     if not isinstance(backend, str) or backend not in EXECUTOR_BACKENDS:
-        raise ConfigError(f"executor.backend 的值 {backend!r} 无效，只能是 codex、hermes 或 claude")
+        raise ConfigError(f"executor.backend 的值 {backend!r} 无效，只能是 codex、hermes、claude 或 agy")
+    claude_bin = executor.get("claude_bin")
+    if claude_bin is not None and (not isinstance(claude_bin, str) or not claude_bin.strip()):
+        raise ConfigError("executor.claude_bin 必须是非空字符串或省略")
     if "safe_mode" in executor and not isinstance(executor["safe_mode"], bool):
         raise ConfigError("executor.safe_mode 必须是布尔值")
     if "disallowed_tools" in executor:
@@ -4278,7 +4281,7 @@ def _is_v3_layer(layer):
         return True
     if str(mon.get("backend") or "").lower() == "agy" or str(mon.get("model") or "").startswith("gemini-"):
         return True
-    if str(ex.get("backend") or "").lower() == "claude":
+    if str(ex.get("backend") or "").lower() in ("claude", "agy"):
         return True
     return False
 
@@ -4319,7 +4322,7 @@ def _apply_v2_compat_defaults(base):
         mon["midleg_llm_on_alert"] = True
     out["monitor"] = mon
     ex = out.get("executor") or {}
-    if str(ex.get("backend") or "").lower() == "claude":
+    if str(ex.get("backend") or "").lower() in ("claude", "agy"):
         ex["backend"] = "codex"
         ex["model"] = "gpt-6.1-sol"
         ex["reasoning_effort"] = "ultra"
@@ -4914,6 +4917,8 @@ def leg_terminal_calls(project, task, leg, since=None):
         return hermes_terminal_calls(project, task, leg, since=since)
     if backend == "claude":
         return v3_research.claude_terminal_calls(leg.get("events", ""))
+    if backend == "agy":
+        return v3_research.parse_agy_stream(leg.get("events", "")).get("tool_calls") or []
     events, _ = read_events(leg.get("events", ""))
     calls = []
     for index, event in enumerate(events):
@@ -6839,7 +6844,7 @@ PRESET_KEYS = {
     "advisor": ("enabled", "backend", "model", "reasoning_effort", "timeout_minutes",
                 "design_gate", "escalate_on_revise_streak", "handle_final_audit", "handle_violation_audit"),
     "executor": ("backend", "provider", "model", "reasoning_effort", "service_tier", "disable_fast_mode",
-                 "permission_mode", "safe_mode", "disallowed_tools", "escalation"),
+                 "claude_bin", "permission_mode", "safe_mode", "disallowed_tools", "escalation"),
     "monitor": ("enabled", "backend", "provider", "base_url", "model", "reasoning_effort",
                 "final_reasoning_effort", "service_tier", "midleg_llm_checks", "midleg_llm_on_alert"),
 }
@@ -6850,8 +6855,13 @@ def _preset_summary(preset):
     adv = preset.get("advisor") or {}
     ex_backend = ex.get("backend") or "codex"
     tier = "·fast" if ex_backend == "codex" and ex.get("service_tier") == "priority" else ""
-    ex_head = (f"claude/{ex.get('model')}·{ex.get('reasoning_effort')}" if ex_backend == "claude"
-               else f"{ex.get('provider', 'openai-codex')}/{ex.get('model')}·{ex.get('reasoning_effort')}{tier}")
+    if ex_backend == "agy":
+        ex_head = f"agy/{ex.get('model')}"
+    elif ex_backend == "claude":
+        cbin = ex.get("claude_bin") or "claude"
+        ex_head = f"{cbin}/{ex.get('model')}·{ex.get('reasoning_effort')}"
+    else:
+        ex_head = f"{ex.get('provider', 'openai-codex')}/{ex.get('model')}·{ex.get('reasoning_effort')}{tier}"
     mon_via = mon.get("backend") or "codex"
     mon_head = (f"{mon_via}/{mon.get('model')}·{mon.get('reasoning_effort')}"
                 if mon_via in ("agy", "claude")
@@ -7117,6 +7127,8 @@ def _claude_should_reset_session(st, new_harness_sha256, cfg):
         last_leg = legs[-1]
         if last_leg.get("status") == "violation":
             return True, "after_violation"
+        if last_leg.get("backend") != "claude":
+            return True, "backend_switched"
         if st.get("rolled_back_since_leg"):
             return True, "after_rollback"
         if int((last_leg.get("claude_meta") or {}).get("compaction_events") or 0) >= 2:
@@ -7147,10 +7159,20 @@ def _claude_handoff_prefix(project, task, st, reason):
     return "\n".join(lines)
 
 
+def claude_executable(cfg=None):
+    """Return the Claude CLI binary/wrapper (e.g. claude-00, claude-01, claude-02, or claude)."""
+    ex = ((cfg or {}).get("executor") or {}) if isinstance(cfg, dict) else {}
+    raw = ex.get("claude_bin") or os.environ.get("BATON_CLAUDE_BIN") or "claude"
+    raw = str(raw).strip()
+    if os.path.isabs(raw) or os.sep in raw:
+        return os.path.expanduser(raw)
+    return platform_support.executable(raw)
+
+
 def claude_command(project, kind, thread_id, cfg=None, task=None, leg_n=1,
                    system_prompt_text="", session_id=None, reset_session=False,
                    mcp_config_path=None):
-    """Build the Claude Code (`claude -p`) invocation for one executor leg."""
+    """Build the Claude Code (`claude -p` or `claude-00/01/02 -p`) invocation for one executor leg."""
     cfg = cfg or project.config
     ex = cfg["executor"]
     model = ex.get("model") or "opus"
@@ -7161,7 +7183,7 @@ def claude_command(project, kind, thread_id, cfg=None, task=None, leg_n=1,
     schema_text = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
 
     cmd = [
-        platform_support.executable("claude"),
+        claude_executable(cfg),
         "-p",
         "--model", str(model),
         "--effort", str(effort),
@@ -7211,6 +7233,90 @@ def claude_executor_env(project, task, leg_n, started_at, cfg, st=None):
     env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+    return env
+
+
+def agy_task_home(project, task):
+    return canonical_dir(os.path.join(project.state_dir, "tasks", str(task), "agy"))
+
+
+def prepare_task_agy_context(project, task, st=None, workspace_root=None, cfg=None):
+    """Prepare approved harness + charter block for agy executor without dirtying repo files."""
+    st = st or {}
+    home = st.get("agy_home") or agy_task_home(project, task)
+    os.makedirs(home, exist_ok=True)
+    parts = []
+    if harness_is_approved(project, task, st):
+        parts.append(read_text(harness_path(project, task)).strip())
+    charter_summary = hermes_ephemeral_system_prompt(project, task, st).strip()
+    if charter_summary:
+        parts.append(charter_summary)
+    ctx_body = "\n\n---\n\n".join(p for p in parts if p) + "\n"
+    ctx_hash = hashlib.sha256(ctx_body.encode("utf-8")).hexdigest()
+    ctx_path = os.path.join(home, "executor-context.md")
+    with open(ctx_path, "w", encoding="utf-8") as stream:
+        stream.write(ctx_body)
+
+    def update(state):
+        state["agy_home"] = home
+        state["agy_context_path"] = ctx_path
+        state["agy_harness_sha256"] = ctx_hash
+    project.update_state(task, update)
+    return ctx_path, ctx_hash
+
+
+def _agy_should_reset_session(st, new_harness_sha256, cfg):
+    """Determine if agy executor must start a fresh conversation instead of --conversation."""
+    if not st or not st.get("thread_id"):
+        return True, "initial"
+    prev_hash = st.get("agy_session_harness_sha256")
+    if prev_hash and new_harness_sha256 and prev_hash != new_harness_sha256:
+        return True, "harness_or_charter_changed"
+    legs = st.get("legs") or []
+    if legs:
+        last_leg = legs[-1]
+        if last_leg.get("status") == "violation":
+            return True, "after_violation"
+        if last_leg.get("backend") != "agy":
+            return True, "backend_switched"
+    if st.get("rolled_back_since_leg"):
+        return True, "after_rollback"
+    max_legs = int((cfg.get("executor") or {}).get("max_legs_per_session", 4) or 4)
+    if int(st.get("agy_session_leg_count", 0) or 0) >= max_legs:
+        return True, f"max_legs_per_session({max_legs})"
+    return False, ""
+
+
+def agy_executor_command(project, kind, thread_id, prompt_text, cfg=None, reset_session=False):
+    """Build the Antigravity CLI (`agy`) invocation for one executor leg (e.g. claude-opus-5-5-high)."""
+    cfg = cfg or project.config
+    ex = cfg["executor"]
+    model = ex.get("model") or "claude-opus-5-5-high"
+    schema_path = os.path.join(TEMPLATES, "leg-result.schema.json")
+    cmd = [
+        platform_support.executable("agy"),
+        "--model", str(model),
+        "--dangerously-skip-permissions",
+        "--disable-slash-commands",
+        "--output-format", "stream-json",
+        "--json-schema", schema_path,
+    ]
+    if kind == "resume" and thread_id and not reset_session:
+        cmd += ["--conversation", str(thread_id)]
+    cmd += ["-p", str(prompt_text)]
+    return cmd
+
+
+def agy_executor_env(project, task, leg_n, started_at, cfg, st=None):
+    env = os.environ.copy()
+    st = st or {}
+    env["BATON_PROJECT_ROOT"] = str(project.root)
+    env["TERMINAL_CWD"] = str(canonical_dir(st.get("launch_root") or project.root))
+    env["BATON_HOME"] = memory_baton_home(cfg)
+    env["BATON_TASK"] = str(task)
+    env["BATON_LEG"] = str(leg_n)
+    env["BATON_LEG_STARTED"] = str(started_at)
+    env["MEM0_TELEMETRY"] = "false"
     return env
 
 
@@ -8249,7 +8355,7 @@ def codex_task_home(project, task):
 
 def executor_isolation_enabled(st):
     """Only tasks that recorded a task-local home use isolated context files."""
-    return bool(isinstance(st, dict) and (st.get("codex_home") or st.get("hermes_home") or st.get("claude_home")))
+    return bool(isinstance(st, dict) and (st.get("codex_home") or st.get("hermes_home") or st.get("claude_home") or st.get("agy_home")))
 
 
 def _codex_home_source():
@@ -9239,6 +9345,7 @@ def cmd_init(project, args):
                 "backend": ex_cfg["backend"],
                 "model": ex_cfg["model"],
                 "reasoning_effort": ex_cfg["reasoning_effort"],
+                "claude_bin": ex_cfg.get("claude_bin", "claude-00"),
                 "permission_mode": ex_cfg.get("permission_mode", "bypassPermissions"),
                 "safe_mode": ex_cfg.get("safe_mode", True),
                 "disallowed_tools": ex_cfg.get("disallowed_tools", ["Bash(baton *)", "Bash(git push*)", "Bash(rm -rf /*)"]),
@@ -9263,18 +9370,39 @@ def cmd_init(project, args):
             },
             "presets": {
                 "research": {
-                    "description": "v3 默认研究模式：Agy Carbon(High) 总控 + Neon(XHigh) Advisor + Hydrogen(XHigh) Monitor + Claude Opus(XHigh) Coding",
+                    "description": "v3 默认研究模式：优先消耗 agy 的 Opus 额度（Carbon High + Neon XHigh + Hydrogen XHigh + agy Claude Opus 5.5 High）",
                     "conductor": {"backend": "agy", "model": "gemini-4-carbon-high", "reasoning_effort": "high", "council_for_major_decisions": False},
                     "advisor": {"enabled": True, "backend": "agy", "model": "gemini-4-neon-xhigh", "reasoning_effort": "xhigh", "design_gate": True, "escalate_on_revise_streak": 2, "handle_final_audit": True, "handle_violation_audit": True},
                     "monitor": {"enabled": True, "backend": "agy", "model": "gemini-4-hydrogen-xhigh", "reasoning_effort": "xhigh", "final_reasoning_effort": "xhigh", "midleg_llm_checks": False, "midleg_llm_on_alert": False},
-                    "executor": {"backend": "claude", "model": "opus", "reasoning_effort": "xhigh", "permission_mode": "bypassPermissions", "safe_mode": True},
+                    "executor": {"backend": "agy", "model": "claude-opus-5-5-high", "reasoning_effort": "high"},
                 },
                 "research-conserve": {
                     "description": "agy 5h 额度吃紧时的降努力度保隔离模式：Monitor 降 Hydrogen(High)，Advisor 降 Neon(High)",
                     "conductor": {"backend": "agy", "model": "gemini-4-carbon-high", "reasoning_effort": "high", "council_for_major_decisions": False},
                     "advisor": {"enabled": True, "backend": "agy", "model": "gemini-4-neon-high", "reasoning_effort": "high", "design_gate": True, "escalate_on_revise_streak": 2, "handle_final_audit": True, "handle_violation_audit": True},
                     "monitor": {"enabled": True, "backend": "agy", "model": "gemini-4-hydrogen-high", "reasoning_effort": "high", "final_reasoning_effort": "high", "midleg_llm_checks": False, "midleg_llm_on_alert": False},
-                    "executor": {"backend": "claude", "model": "opus", "reasoning_effort": "xhigh", "permission_mode": "bypassPermissions", "safe_mode": True},
+                    "executor": {"backend": "agy", "model": "claude-opus-5-5-high", "reasoning_effort": "high"},
+                },
+                "claude-00": {
+                    "description": "切换 Executor 到 claude-00（claude-accounts 账号 00 · Opus XHigh）",
+                    "conductor": {"backend": "agy", "model": "gemini-4-carbon-high", "reasoning_effort": "high", "council_for_major_decisions": False},
+                    "advisor": {"enabled": True, "backend": "agy", "model": "gemini-4-neon-xhigh", "reasoning_effort": "xhigh", "design_gate": True, "escalate_on_revise_streak": 2, "handle_final_audit": True, "handle_violation_audit": True},
+                    "monitor": {"enabled": True, "backend": "agy", "model": "gemini-4-hydrogen-xhigh", "reasoning_effort": "xhigh", "final_reasoning_effort": "xhigh", "midleg_llm_checks": False, "midleg_llm_on_alert": False},
+                    "executor": {"backend": "claude", "claude_bin": "claude-00", "model": "opus", "reasoning_effort": "xhigh", "permission_mode": "bypassPermissions", "safe_mode": True},
+                },
+                "claude-01": {
+                    "description": "切换 Executor 到 claude-01（claude-accounts 账号 01 · Opus XHigh）",
+                    "conductor": {"backend": "agy", "model": "gemini-4-carbon-high", "reasoning_effort": "high", "council_for_major_decisions": False},
+                    "advisor": {"enabled": True, "backend": "agy", "model": "gemini-4-neon-xhigh", "reasoning_effort": "xhigh", "design_gate": True, "escalate_on_revise_streak": 2, "handle_final_audit": True, "handle_violation_audit": True},
+                    "monitor": {"enabled": True, "backend": "agy", "model": "gemini-4-hydrogen-xhigh", "reasoning_effort": "xhigh", "final_reasoning_effort": "xhigh", "midleg_llm_checks": False, "midleg_llm_on_alert": False},
+                    "executor": {"backend": "claude", "claude_bin": "claude-01", "model": "opus", "reasoning_effort": "xhigh", "permission_mode": "bypassPermissions", "safe_mode": True},
+                },
+                "claude-02": {
+                    "description": "切换 Executor 到 claude-02（claude-accounts 账号 02 · Opus XHigh）",
+                    "conductor": {"backend": "agy", "model": "gemini-4-carbon-high", "reasoning_effort": "high", "council_for_major_decisions": False},
+                    "advisor": {"enabled": True, "backend": "agy", "model": "gemini-4-neon-xhigh", "reasoning_effort": "xhigh", "design_gate": True, "escalate_on_revise_streak": 2, "handle_final_audit": True, "handle_violation_audit": True},
+                    "monitor": {"enabled": True, "backend": "agy", "model": "gemini-4-hydrogen-xhigh", "reasoning_effort": "xhigh", "final_reasoning_effort": "xhigh", "midleg_llm_checks": False, "midleg_llm_on_alert": False},
+                    "executor": {"backend": "claude", "claude_bin": "claude-02", "model": "opus", "reasoning_effort": "xhigh", "permission_mode": "bypassPermissions", "safe_mode": True},
                 },
                 "v2-codex": {
                     "description": "兼容 v2 的纯 Codex 编排预设",
@@ -9578,7 +9706,17 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
         claude_reset_session = False
         claude_reset_reason = ""
         claude_session_id = None
-        if cfg["executor"].get("backend") == "claude":
+        agy_ctx_path = None
+        agy_harness_hash = None
+        agy_reset_session = False
+        agy_reset_reason = ""
+        if cfg["executor"].get("backend") == "agy":
+            agy_ctx_path, agy_harness_hash = prepare_task_agy_context(
+                project, task, st, workspace_root=workspace_root, cfg=effective_cfg
+            )
+            st = project.read_state(task, {}) or st
+            agy_reset_session, agy_reset_reason = _agy_should_reset_session(st, agy_harness_hash, effective_cfg)
+        elif cfg["executor"].get("backend") == "claude":
             claude_sys_prompt_path, claude_harness_hash, claude_mcp_path = prepare_task_claude_context(
                 project, task, st, workspace_root=workspace_root, cfg=effective_cfg
             )
@@ -9639,24 +9777,37 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
         original_prompt = prompt
         prompt, memory_meta = memory_prompt_for_leg(project, task, prompt, st=st, cfg=cfg)
         if memory_meta.get("context"):
-            if cfg["executor"].get("backend") in ("codex", "claude") and memory_meta.get("core"):
+            if cfg["executor"].get("backend") in ("codex", "claude", "agy") and memory_meta.get("core"):
                 prompt = (memory_meta["core"] + "\n\n" + original_prompt.rstrip() +
                           "\n\n" + memory_meta["context"])
             elif cfg["executor"].get("backend") == "hermes":
                 prompt = original_prompt.rstrip() + "\n\n" + memory_meta["context"]
         if cfg["executor"].get("backend") == "claude" and kind == "resume" and claude_reset_session:
             prompt = _claude_handoff_prefix(project, task, st, claude_reset_reason) + prompt
+        if cfg["executor"].get("backend") == "agy":
+            agy_prefix_parts = []
+            if agy_ctx_path and os.path.isfile(agy_ctx_path):
+                agy_prefix_parts.append(read_text(agy_ctx_path).strip())
+            if kind == "resume" and agy_reset_session:
+                agy_prefix_parts.append(_claude_handoff_prefix(project, task, st, agy_reset_reason).strip())
+            if agy_prefix_parts:
+                prompt = "\n\n---\n\n".join(agy_prefix_parts) + "\n\n---\n\n" + prompt
         with open(prompt_path, "w", encoding="utf-8") as f:
             f.write(prompt)
 
-        if cfg["executor"].get("backend") != "claude":
+        if cfg["executor"].get("backend") not in ("claude", "agy"):
             print(codex_quota.describe(safe_quota(block=True, notify=True)))
 
         start_ref, err = try_checkpoint(project, task, f"leg-{n:03d}-start", st=st)
         if err:
             print(f"注意：本轮起点回滚点没建成：{err}")
         last_path = project.leg_path(task, n, "last.json")
-        if cfg["executor"].get("backend") == "claude":
+        if cfg["executor"].get("backend") == "agy":
+            cmd = agy_executor_command(
+                project, kind, st.get("thread_id"), prompt, cfg=effective_cfg,
+                reset_session=agy_reset_session,
+            )
+        elif cfg["executor"].get("backend") == "claude":
             sys_prompt_text = read_text(claude_sys_prompt_path) if claude_sys_prompt_path else ""
             cmd = claude_command(
                 project, kind, st.get("thread_id"), cfg=effective_cfg, task=task, leg_n=n,
@@ -9726,7 +9877,15 @@ def launch_leg(project, task, kind, prompt, force_escalate=False):
             s.pop("pending_drift", None)
             s.pop("supervision_action", None)
             s["supervision_fallback"] = False
-            if cfg["executor"].get("backend") == "claude":
+            if cfg["executor"].get("backend") == "agy":
+                if agy_reset_session or kind == "start":
+                    s["thread_id"] = None
+                    s["agy_session_leg_count"] = 1
+                    s["agy_session_harness_sha256"] = agy_harness_hash
+                    s.pop("rolled_back_since_leg", None)
+                else:
+                    s["agy_session_leg_count"] = int(s.get("agy_session_leg_count", 0) or 0) + 1
+            elif cfg["executor"].get("backend") == "claude":
                 if claude_reset_session or kind == "start":
                     s["thread_id"] = claude_session_id
                     s["claude_session_leg_count"] = 1
@@ -10147,6 +10306,7 @@ def cmd_run(project, args):
             exec_backend = cfg["executor"].get("backend", "codex")
             is_hermes = exec_backend == "hermes"
             is_claude = exec_backend == "claude"
+            is_agy = exec_backend == "agy"
             if is_hermes:
                 hermes_preflight(project, cfg)
             try:
@@ -10161,6 +10321,10 @@ def cmd_run(project, args):
                     proc = platform_support.detached_popen(attempt_cmd, cwd=workspace_root, stdin=subprocess.DEVNULL,
                                             stdout=fout, stderr=ferr,
                                             env=hermes_executor_env(project, task, n, leg["started_at"], cfg, st))
+                elif is_agy:
+                    proc = platform_support.detached_popen(attempt_cmd, cwd=workspace_root, stdin=subprocess.DEVNULL,
+                                            stdout=fout, stderr=ferr,
+                                            env=agy_executor_env(project, task, n, leg["started_at"], cfg, st))
                 elif is_claude:
                     with open(attempt_prompt, "rb") as fin:
                         proc = platform_support.detached_popen(attempt_cmd, cwd=workspace_root, stdin=fin, stdout=fout,
@@ -10176,8 +10340,12 @@ def cmd_run(project, args):
                 if proc.poll() is not None:
                     break  # finished on its own during the sleep: its result wins over a late stop
                 if not st.get("thread_id"):
-                    tid = (v3_research.parse_claude_stream(leg["events"], event_offset).get("session_id")
-                           if is_claude else thread_id_from(leg["events"]))
+                    if is_claude:
+                        tid = v3_research.parse_claude_stream(leg["events"], event_offset).get("session_id")
+                    elif is_agy:
+                        tid = v3_research.parse_agy_stream(leg["events"], event_offset).get("conversation_id")
+                    else:
+                        tid = thread_id_from(leg["events"])
                     if tid:
                         st = project.update_state(task, lambda s: s.update(thread_id=tid))
                 current_state = project.read_state(task, {}) or st
@@ -10255,6 +10423,27 @@ def cmd_run(project, args):
                 if parsed is not None:
                     write_json(leg["last"], parsed)
                 current_result = parsed
+            elif is_agy:
+                aparsed = v3_research.parse_agy_stream(leg["events"], event_offset)
+                if aparsed.get("conversation_id"):
+                    st = project.update_state(task, lambda s: s.update(thread_id=aparsed["conversation_id"]))
+                ameta = {
+                    "model": aparsed.get("model") or cfg["executor"].get("model"),
+                    "conversation_id": aparsed.get("conversation_id"),
+                    "duration_seconds": aparsed.get("duration_seconds"),
+                    "num_turns": aparsed.get("num_turns"),
+                    "usage": aparsed.get("usage") or {},
+                }
+                project.update_state(task, lambda s: (current_leg(s) or {}).update(agy_meta=ameta))
+                parsed_out = normalize_executor_result(aparsed.get("structured_output"))
+                if parsed_out is None and reason:
+                    log_tail = read_text(project.p("log.md"))[-1000:]
+                    parsed_out = v3_research.synthesize_interrupted_agy_result(reason, aparsed, log_tail=log_tail)
+                if parsed_out is not None:
+                    write_json(leg["last"], parsed_out)
+                current_result = parsed_out
+                if aparsed.get("status") and aparsed["status"].upper() not in ("SUCCESS", "OK") and not result_error:
+                    result_error = aparsed.get("response_text") or f"agy executor status={aparsed['status']}"
             elif is_claude:
                 cparsed = v3_research.parse_claude_stream(leg["events"], event_offset)
                 if cparsed.get("session_id"):
@@ -10306,6 +10495,8 @@ def cmd_run(project, args):
                                                   stderr_offset, rc_value, current_result))
             if is_claude:
                 has_output = bool(v3_research.parse_claude_stream(leg["events"], event_offset).get("has_output"))
+            elif is_agy:
+                has_output = bool(v3_research.parse_agy_stream(leg["events"], event_offset).get("has_output"))
             elif is_hermes:
                 has_output = bool(hermes_stdout.strip())
             else:
@@ -10326,7 +10517,11 @@ def cmd_run(project, args):
                 retry_prompt = project.leg_path(task, n, f"retry-{attempt:03d}.prompt.md")
                 with open(retry_prompt, "w", encoding="utf-8") as stream:
                     stream.write("上一次调用因模型容量不足中断，请从中断处继续当前任务，遵守 Baton 执行协议，本轮结束按 JSON schema 输出。")
-                if cfg["executor"].get("backend") == "claude":
+                if cfg["executor"].get("backend") == "agy":
+                    attempt_cmd = agy_executor_command(
+                        project, "resume", thread_id, read_text(retry_prompt), cfg=cfg,
+                    )
+                elif cfg["executor"].get("backend") == "claude":
                     sys_prompt_path = (current_state or {}).get("claude_system_prompt_path")
                     sys_prompt_text = read_text(sys_prompt_path) if sys_prompt_path and os.path.isfile(sys_prompt_path) else ""
                     attempt_cmd = claude_command(
@@ -10484,6 +10679,10 @@ def cmd_run(project, args):
         cparsed_end = v3_research.parse_claude_stream(leg["events"])
         if cparsed_end.get("usage"):
             dg["usage"] = cparsed_end["usage"]
+    elif monitor_cfg["executor"].get("backend") == "agy":
+        aparsed_end = v3_research.parse_agy_stream(leg["events"])
+        if aparsed_end.get("usage"):
+            dg["usage"] = aparsed_end["usage"]
     dossier_id = None
     if monitor_enabled(monitor_cfg) and status in ("report", "done", "violation"):
         # The dossier is assembled from the immutable end checkpoint after the executor leg
@@ -10541,7 +10740,7 @@ def cmd_run(project, args):
         os.remove(stop_flag)
     except OSError:
         pass
-    if monitor_cfg["executor"].get("backend") != "claude":
+    if monitor_cfg["executor"].get("backend") not in ("claude", "agy"):
         safe_quota(block=True, notify=True)
 
 
@@ -10668,6 +10867,21 @@ def leg_event_text(project, task, leg):
         lines.append(f"容量不足，已自动重试 {count} 次{reset}" + ("；" + times if times else ""))
     elif leg.get("failure_kind") == "quota":
         lines.append("额度耗尽属于基础设施问题，不是方法失败；等待额度重置或换账号后 baton resume " + task + "。")
+        exec_backend = leg.get("backend") or cfg["executor"].get("backend")
+        if exec_backend == "agy":
+            lines.append(
+                f"agy Opus 额度耗尽时，可运行 baton preset use claude-00 --task {task}"
+                "（或 claude-01 / claude-02）切到 Claude 账号后继续。"
+            )
+        elif exec_backend == "claude":
+            cur_bin = cfg["executor"].get("claude_bin") or "claude"
+            alts = [p for p in ("claude-00", "claude-01", "claude-02") if p != cur_bin]
+            first_alt = alts[0] if alts else "claude-00"
+            other_alts = " / ".join(alts[1:] + ["research"])
+            lines.append(
+                f"当前 Claude 账号（{cur_bin}）额度耗尽时，可运行 baton preset use {first_alt} --task {task}"
+                f"（或 {other_alts}）切换后继续。"
+            )
         reset = _quota_reset_text()
         if reset:
             lines.append("额度重置时间：" + reset)
@@ -12387,6 +12601,7 @@ def cmd_doctor(project, args):
         str(cfg["conductor"].get("backend") or "").lower() == "agy"
         or str(cfg["conductor"].get("model") or "").startswith("gemini-")
         or monitor_backend(cfg) == "agy"
+        or ex.get("backend") == "agy"
         or ((cfg.get("advisor") or {}).get("enabled") and str((cfg.get("advisor") or {}).get("backend") or "agy").lower() == "agy")
     )
     uses_claude = (
@@ -12400,14 +12615,17 @@ def cmd_doctor(project, args):
         if agy_bin:
             line("OK", "agy 版本：" + (run([platform_support.executable("agy"), "--version"], check=False).strip() or "未知"))
     if uses_claude:
-        claude_bin = shutil.which("claude.exe" if os.name == "nt" else "claude")
-        line("OK" if claude_bin else "FAIL", f"claude CLI：{claude_bin or '未安装'}")
+        cbin_name = str(ex.get("claude_bin") or "claude") if ex.get("backend") == "claude" else "claude"
+        claude_bin = cbin_name if (os.path.isabs(cbin_name) and os.path.exists(cbin_name)) else shutil.which(cbin_name)
+        line("OK" if claude_bin else "FAIL", f"claude CLI ({cbin_name})：{claude_bin or '未安装'}")
         if claude_bin:
-            line("OK", "claude 版本：" + (run([platform_support.executable("claude"), "--version"], check=False).strip() or "未知"))
+            line("OK", f"claude ({cbin_name}) 版本：" + (run([claude_bin, "--version"], check=False).strip() or "未知"))
     if ex.get("backend") == "hermes":
         line("OK", f"codex CLI：Hermes backend 不需要直连 Codex CLI（provider={executor_provider(cfg)}）")
+    elif ex.get("backend") == "agy":
+        line("OK", f"Agy executor：model={ex['model']}（优先消耗 agy 额度；切账号可用 baton preset use claude-00/01/02）")
     elif ex.get("backend") == "claude":
-        line("OK", f"Claude executor：model={ex['model']} effort={ex['reasoning_effort']} safe_mode={ex.get('safe_mode', True)}")
+        line("OK", f"Claude executor：bin={ex.get('claude_bin') or 'claude'} model={ex['model']} effort={ex['reasoning_effort']} safe_mode={ex.get('safe_mode', True)}")
     else:
         codex = shutil.which("codex.exe" if os.name == "nt" else "codex")
         line("OK" if codex else "FAIL", f"codex CLI：{codex or '未安装'}")
@@ -12430,8 +12648,8 @@ def cmd_doctor(project, args):
     if ex.get("backend") == "hermes":
         line("OK", f"Hermes executor：provider={executor_provider(cfg)} model={ex['model']} effort={ex['reasoning_effort']}")
         line("OK", "Hermes quota：跳过 Codex CLI quota probe，由 Hermes provider 管理")
-    elif ex.get("backend") == "claude":
-        line("OK", "Claude quota：跳过 Codex CLI quota probe，由 Claude/Agy statusline 与 stream-json 观测")
+    elif ex.get("backend") in ("claude", "agy"):
+        line("OK", f"{ex['backend'].title()} quota：跳过 Codex CLI quota probe，由 Agy/Claude statusline 与 stream-json 观测")
     else:
         cache = read_json(os.path.expanduser("~/.codex/models_cache.json"), {})
         models = cache.get("models", cache) if isinstance(cache, dict) else cache

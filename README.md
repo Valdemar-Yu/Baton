@@ -15,15 +15,15 @@ Baton v3 是面向研究型开发与实验工程的多模型协作编排框架�
 | **Conductor（日常总控）** | `agy` 主会话，`gemini-4-carbon-high` | 起草 `brief.md` 与 `harness.md`、判断是否需要 `baton advise`、逐条 `baton rule` / `decide` / `close`；不改代码、不自审自裁 |
 | **Advisor（首席设计 & 高阶终审）** | `agy -p` 无状态只读进程，`gemini-4-neon-xhigh` | 开题实验设计把关（`design`）、关键决策权衡（`decide`）、终审/违例/连续≥2次 REVISE 的单轨冷眼审计（`audit`）、卡壳诊断（`unblock`） |
 | **Monitor（常规冷眼审计）** | `agy -p` 只读隔离进程，`gemini-4-hydrogen-xhigh` | 对常规 `REPORT` 卷宗执行跨家族冷眼证据核对，逐条输出偏离（`F1/F2...`）与记忆建议 |
-| **Executor（编程执行者）** | `claude -p --safe-mode`，`opus` / `xhigh` | 唯一代码写入者；通过 `--append-system-prompt` 注入审定 `harness.md`（不污染仓库 `CLAUDE.md`），流式 `stream-json` + 结构化输出 |
+| **Executor（编程执行者）** | 默认 `agy -p`（`claude-opus-5-5-high`，优先消耗 `agy` Opus 额度）；按需切 `claude-00/01/02`（`claude-accounts` · `opus` / `xhigh`） | 唯一代码写入者；不污染仓库 `CLAUDE.md`，流式 `stream-json` + 结构化输出，跨 backend 切换自动附带交接包 |
 
 ### v3 核心新增特性
 
 1. **单轨冷眼审计路由器（省配额、不叠罗汉）**：每份封存卷宗只由一位冷眼角色审计——常规 `REPORT` 走 Hydrogen Monitor；`DONE` 终审、`VIOLATION` 违例及连续 ≥2 次 `REVISE` 自动跳过 Monitor、直达 Neon Advisor，复用同一套 `monitor-brief.schema.json` 与 `baton rule` 账本门槛。
 2. **一等子命令 `baton advise`**：提供 `design` / `decide` / `audit` / `unblock` 四种正交模式；由 CLI 确定性打包权威文件到只读快照目录，严禁 Conductor 用自然语言“转述病情”，结果落盘 `.baton/advice/A<NNN>.{json,md}` 并记入哈希链账本。
 3. **研究型 0-token `RED_FLAGS` 静态扫描 + 防锚定阅读顺序**：卷宗封存时自动静态扫描 `diff.patch` 中的静默 `except: pass`、疑似调试截断（`[:N]` / `max_samples` / `.head(N)`）、新增 `skip`/`xfail`、容差与 `seed`/数据划分改动，置于 `evidence.md` 顶部；强制审计员先看章程与证据，最后才看 Executor 自述。
-4. **L1 0-token 轮中守卫 + 三档预设**：默认关闭盲目定时 LLM 轮询（`monitor.midleg_llm_checks: false`），由 60s 冻结校验 + 规则信号 + Claude `stream-json` 实时监控（权限拒批、连续工具失败死循环、compaction 爆发）守护轮中安全。`agy` 5h 配额紧张时可一键 `baton preset use research-conserve` 降努力度但不降冷眼隔离制度；需要 v2 Codex 栈时可切 `baton preset use v2-codex`。
-5. **Claude Code `--safe-mode` Executor**：保留 OAuth 订阅鉴权、屏蔽用户全局规则污染、禁用 `Bash(baton *)` / `Bash(git push*)` 防止越权篡改账本，在 harness 变更、违例、回滚或轮次达上限时自动重置新会话并注入压缩交接包。
+4. **L1 0-token 轮中守卫 + 多档预设**：默认关闭盲目定时 LLM 轮询（`monitor.midleg_llm_checks: false`），由 60s 冻结校验 + 规则信号 + 流式事件监控（权限拒批、连续工具失败死循环、compaction 爆发）守护轮中安全。`agy` 5h 配额紧张时可一键 `baton preset use research-conserve` 降努力度但不降冷眼隔离制度；切换个人 Claude 订阅可用 `claude-00` / `claude-01` / `claude-02`；需要 v2 Codex 栈时可切 `baton preset use v2-codex`。
+5. **双轨 Opus Executor（优先 `agy` Opus，按需切 `claude-00/01/02`）**：默认优先走 `agy -p --model claude-opus-5-5-high` 消耗 Antigravity 的 Opus 配额，不触碰个人 Anthropic 账号；当 `agy` Opus 额度不足或需要 `xhigh` 时，可一键 `baton preset use claude-00`（或 `claude-01`/`claude-02`，经 `claude-accounts` + `--safe-mode`）无缝接续，跨后端切换自动生成压缩交接包并禁用 `Bash(baton *)` / `Bash(git push*)`。
 6. **Antigravity (`agy`) Statusline 同步**：内置 `skills/baton/scripts/agy_statusline.py`，在 `agy` 终端实时展示 `model`、`effort`、`context` 进度条、`5h`/`7d` 剩余额度与倒计时，以及 Baton v3 运行/空闲状态。安装：`./install.sh --agy` 或 `baton statusline install --agy`。
 
 完整 v3 设计见 [docs/v3-design.md](docs/v3-design.md)，v2 原始设计见 [docs/v2-design.md](docs/v2-design.md)。
@@ -40,7 +40,7 @@ cd Baton
 
 # 在研究/代码项目目录中：
 baton doctor
-baton init                    # 生成 v3 默认 baton.json（含 research / research-conserve / v2-codex 预设）
+baton init                    # 生成 v3 默认 baton.json（含 research / research-conserve / claude-00..02 / v2-codex 预设）
 baton new my-exp
 # 编辑 brief.md 后请 Neon Advisor 开题把关：
 baton advise design my-exp

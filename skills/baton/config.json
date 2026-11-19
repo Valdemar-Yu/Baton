@@ -1,5 +1,5 @@
 {
-  "_comment": "Baton v3 defaults (Agy-core + Claude-coding Research Baton). Deep-merges: this skill config.json, <project>/.baton/config.json, then <project>/baton.json. Project quota.* is ignored.",
+  "_comment": "Baton v3 defaults (Agy-core Research Baton: prioritizes agy Opus quota, falls back to claude-00/01/02 via claude-accounts). Deep-merges: this skill config.json, <project>/.baton/config.json, then <project>/baton.json. Project quota.* is ignored.",
   "version": 3,
   "conductor": {
     "backend": "agy",
@@ -31,9 +31,10 @@
     "midleg_llm_on_alert": false
   },
   "executor": {
-    "backend": "claude",
-    "model": "opus",
-    "reasoning_effort": "xhigh",
+    "backend": "agy",
+    "model": "claude-opus-5-5-high",
+    "reasoning_effort": "high",
+    "claude_bin": "claude-00",
     "permission_mode": "bypassPermissions",
     "safe_mode": true,
     "disallowed_tools": [
@@ -48,8 +49,8 @@
     "sandbox_exec": true,
     "escalation": {
       "enabled": false,
-      "model": "opus",
-      "reasoning_effort": "max",
+      "model": "claude-opus-5-5-high",
+      "reasoning_effort": "high",
       "after_revise": 2,
       "after_blocked_or_failed_legs": 2,
       "max_per_task": 2

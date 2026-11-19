@@ -337,6 +337,111 @@ def synthesize_interrupted_claude_result(reason, parsed, diff_stat="", log_tail=
 
 # ---- 3. Antigravity (`agy -p`) isolated read-only helpers ----
 
+def parse_agy_stream(path, offset=0):
+    """Parse an `agy --output-format stream-json` NDJSON file from byte offset.
+
+    Returns dict with:
+      conversation_id, model, structured_output, status, response_text,
+      duration_seconds, num_turns, usage, tool_calls, has_output, next_offset
+    """
+    info = {
+        "conversation_id": None,
+        "model": None,
+        "structured_output": None,
+        "status": "",
+        "response_text": "",
+        "duration_seconds": None,
+        "num_turns": 0,
+        "usage": {},
+        "tool_calls": [],
+        "has_output": False,
+        "next_offset": offset,
+    }
+    if not path or not os.path.exists(path):
+        return info
+    try:
+        with open(path, "rb") as f:
+            if offset:
+                f.seek(offset)
+            data = f.read()
+            info["next_offset"] = f.tell()
+    except OSError:
+        return info
+
+    for raw_line in data.splitlines():
+        line = raw_line.decode("utf-8", "replace").strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        cid = ev.get("conversation_id")
+        if isinstance(cid, str) and cid:
+            info["conversation_id"] = cid
+        etype = ev.get("event")
+        if etype == "init":
+            init_obj = ev.get("init") or {}
+            if isinstance(init_obj, dict) and isinstance(init_obj.get("model"), str):
+                info["model"] = init_obj["model"]
+        elif etype == "step_update":
+            info["has_output"] = True
+            su = ev.get("step_update") or {}
+            if isinstance(su, dict):
+                if isinstance(su.get("conversation_id"), str) and su["conversation_id"]:
+                    info["conversation_id"] = su["conversation_id"]
+                if su.get("step_type") in ("run_command", "command") and su.get("command"):
+                    info["tool_calls"].append({
+                        "command": str(su.get("command")),
+                        "exit_code": su.get("exit_code"),
+                        "time": "",
+                    })
+        elif etype == "result":
+            info["has_output"] = True
+            res = ev.get("result") or {}
+            if isinstance(res, dict):
+                if isinstance(res.get("conversation_id"), str) and res["conversation_id"]:
+                    info["conversation_id"] = res["conversation_id"]
+                info["status"] = str(res.get("status") or "")
+                info["duration_seconds"] = res.get("duration_seconds")
+                info["num_turns"] = int(res.get("num_turns") or 0)
+                if isinstance(res.get("usage"), dict):
+                    info["usage"] = res["usage"]
+                if isinstance(res.get("structured_output"), dict):
+                    info["structured_output"] = res["structured_output"]
+                if isinstance(res.get("response"), str):
+                    info["response_text"] = res["response"]
+                    if info["structured_output"] is None:
+                        r = res["response"].strip()
+                        if r.startswith("{") and r.endswith("}"):
+                            try:
+                                parsed = json.loads(r)
+                                if isinstance(parsed, dict):
+                                    info["structured_output"] = parsed
+                            except ValueError:
+                                pass
+    return info
+
+
+def synthesize_interrupted_agy_result(reason, parsed, diff_stat="", log_tail=""):
+    """Synthesize a fallback leg-result when agy executor is interrupted before final result."""
+    parts = [f"本轮因 {reason or 'interrupted'} 中断（agy executor 会话 {parsed.get('conversation_id') or '?'}）。"]
+    if diff_stat:
+        parts.append("改动摘要：" + diff_stat.strip()[:400])
+    if log_tail:
+        parts.append("log 尾迹：" + log_tail.strip()[-300:])
+    return {
+        "status": "blocked",
+        "summary": " ".join(parts)[:2000],
+        "artifact": "",
+        "change_size": "minor" if diff_stat else "none",
+        "memory_used": [],
+        "interrupted": True,
+    }
+
+
 def write_isolated_agy_settings(path):
     """Write a minimal read-only session settings JSON for `agy --settings`."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
